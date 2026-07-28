@@ -1,16 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react'
 import { PitchDetector } from 'pitchy'
 import { OpenSheetMusicDisplay, GraphicalNote } from 'opensheetmusicdisplay'
 
 /* ============================================================
- *  pitch-rec — Step 3: 演奏の同期と判定
- *
- *  時間の扱い（ここが心臓部）
- *  - 時計は AudioContext.currentTime を使う。setInterval や Date.now は
- *    タブの状態やGCでブレるが、こちらは音声クロックなのでズレない。
- *  - 曲の t=0 は「最初の音が鳴り始める瞬間」。弱起の曲は t=0 が弱起の頭で、
- *    小節線（1拍目）は t = 弱起の長さ。クリック音もこの格子に乗せる。
- *  - 開始は 2 通り: 最初の音を聴き取って自動で走り出す / 1小節カウントイン。
+ *  pitch-rec — Step 3.5
+ *  追加:
+ *   1. 外れた音符の上に「どちらへ・どれだけ」外れたかの札を出す
+ *      ▲1半音 / ▼32¢ のように、方向と量をその場で読めるようにする
+ *   2. 画面が裏に回ったらマイクを閉じる（録音インジケータも電池も落とす）
  * ============================================================ */
 
 /* ---------- 音名ユーティリティ ---------- */
@@ -35,14 +40,16 @@ function midiToName(midi) {
   return { name: SHARP_NAMES[((n % 12) + 12) % 12], octave: Math.floor(n / 12) - 1 }
 }
 
+function midiToLabel(midi) {
+  const { name, octave } = midiToName(midi)
+  return `${name}${octave}`
+}
+
 function freqToMidiFloat(freq, a4) {
   return 69 + 12 * Math.log2(freq / a4)
 }
 
-/* ---------- デモ曲（すべてパブリックドメイン） ----------
- * n = 音名, d = 4分音符を1とした長さ
- * time = 拍子, fifths = 調号(#の数), pickup = 弱起の拍数
- */
+/* ---------- デモ曲（すべてパブリックドメイン） ---------- */
 const SONGS = [
   {
     id: 'twinkle',
@@ -224,11 +231,9 @@ ${body}
 </score-partwise>`
 }
 
-/* ---------- 曲の時間割を作る ----------
- * onset[i] … i番目の音が鳴り始める秒数（t=0 は最初の音の頭）
- */
+/* ---------- 曲の時間割 ---------- */
 function buildTimeline(song, bpm) {
-  const spb = 60 / bpm // 4分音符1つ分の秒数
+  const spb = 60 / bpm
   const onsets = []
   let t = 0
   for (const nt of song.notes) {
@@ -269,14 +274,14 @@ const MAX_HZ = 3200
 const CLARITY_MIN = 0.88
 const RMS_MIN = 0.008
 const HOLD_MS = 350
-const IN_TUNE_CENTS = 8 // チューナーの針が緑になる幅
+const IN_TUNE_CENTS = 8
 
 /* ---------- 判定パラメータ ---------- */
-const ATTACK_SKIP = 0.12 // 音の立ち上がりを捨てる秒数（弓の当たり始めは音程が暴れる）
-const RELEASE_SKIP = 0.06 // 音の終わり際を捨てる秒数
-const MIN_SAMPLES = 3 // これ未満なら「鳴っていない」
-const NAME_HIT_RATIO = 0.5 // 音名が合っていた割合がこれ未満なら「違う音」
-const GOOD_CENTS = 15 // 平均のズレがこれ以内なら合格
+const ATTACK_SKIP = 0.12
+const RELEASE_SKIP = 0.06
+const MIN_SAMPLES = 3
+const NAME_HIT_RATIO = 0.5
+const GOOD_CENTS = 15
 
 const VERDICT = {
   ok: { color: '#0f8a45', label: '合格' },
@@ -287,12 +292,36 @@ const VERDICT = {
 }
 const COLOR_DEFAULT = '#10131c'
 
-/* 縦横で譜面の拡大率を変える */
 const ZOOM = { portrait: 0.72, landscape: 0.58 }
 
 function median(arr) {
   const s = [...arr].sort((a, b) => a - b)
   return s[Math.floor(s.length / 2)]
+}
+
+/* ---------- 外れ方の札 ---------- */
+function badgeOf(v) {
+  if (!v) return null
+  if (v.verdict === 'sharp' || v.verdict === 'flat') {
+    const up = v.avgCents > 0
+    return {
+      dir: up ? 'up' : 'down',
+      text: `${Math.abs(v.avgCents)}¢`,
+      color: VERDICT[v.verdict].color,
+      title: `${up ? '高い' : '低い'}（${Math.abs(v.avgCents)}セント）`,
+    }
+  }
+  if (v.verdict === 'wrong') {
+    const up = v.semis > 0
+    const n = Math.abs(v.semis)
+    return {
+      dir: up ? 'up' : 'down',
+      text: n ? `${n}半音` : `${Math.abs(v.avgCents ?? 0)}¢`,
+      color: VERDICT.wrong.color,
+      title: `${v.playedName ?? '別の音'} を弾いています（${up ? '高い' : '低い'}）`,
+    }
+  }
+  return null
 }
 
 /* ============================================================
@@ -317,14 +346,13 @@ function useLayoutMode() {
 
 /* ============================================================
  *  ピッチ検出
- *  - readingRef は毎フレーム更新（判定用）
- *  - React の state は 50ms 間隔に間引く（描画負荷を抑えるため）
  * ============================================================ */
 function usePitch(a4) {
   const [running, setRunning] = useState(false)
   const [error, setError] = useState(null)
   const [reading, setReading] = useState(null)
   const [level, setLevel] = useState(0)
+  const [autoStopped, setAutoStopped] = useState(false)
 
   const ctxRef = useRef(null)
   const streamRef = useRef(null)
@@ -338,8 +366,9 @@ function usePitch(a4) {
 
   const stop = useCallback(() => {
     cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
     streamRef.current?.getTracks().forEach((t) => t.stop())
-    ctxRef.current?.close()
+    ctxRef.current?.close().catch(() => {})
     ctxRef.current = null
     streamRef.current = null
     bufRef.current = []
@@ -349,8 +378,12 @@ function usePitch(a4) {
     setRunning(false)
   }, [])
 
+  const stopRef = useRef(stop)
+  stopRef.current = stop
+
   const start = useCallback(async () => {
     setError(null)
+    setAutoStopped(false)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
@@ -390,7 +423,6 @@ function usePitch(a4) {
 
         const now = performance.now()
         const push = now - lastPushRef.current > 50
-
         if (push) setLevel(Math.min(1, rms * 12))
 
         if (rms < RMS_MIN) {
@@ -434,17 +466,36 @@ function usePitch(a4) {
     }
   }, [])
 
-  useEffect(() => () => stop(), [stop])
+  /* 画面が裏に回ったらマイクを閉じる（録音インジケータを消し、電池を使わない） */
+  useEffect(() => {
+    const release = () => {
+      if (!ctxRef.current) return
+      stopRef.current()
+      setAutoStopped(true)
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') release()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', release)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', release)
+    }
+  }, [])
 
-  return { running, error, reading, level, start, stop, ctxRef, readingRef }
+  useEffect(() => () => stopRef.current(), [])
+
+  return { running, error, reading, level, autoStopped, start, stop, ctxRef, readingRef }
 }
 
 /* ============================================================
  *  楽譜（OpenSheetMusicDisplay）
- *  paint() は SVG を直接塗る。再描画すると重くて演奏に間に合わないため。
  * ============================================================ */
 function useScore(song, mode) {
   const hostRef = useRef(null)
+  const innerRef = useRef(null)
+  const scrollRef = useRef(null)
   const osmdRef = useRef(null)
   const notesRef = useRef([])
   const elemsRef = useRef([])
@@ -452,10 +503,10 @@ function useScore(song, mode) {
   const cursorAtRef = useRef(0)
   const [status, setStatus] = useState('loading')
   const [total, setTotal] = useState(0)
+  const [layout, bumpLayout] = useReducer((n) => n + 1, 0)
   const modeRef = useRef(mode)
   modeRef.current = mode
 
-  /* 音符ごとの SVG 要素を集める（描画のたびに作り直しが要る） */
   const cacheElements = useCallback(() => {
     const osmd = osmdRef.current
     if (!osmd) return
@@ -479,13 +530,10 @@ function useScore(song, mode) {
     return true
   }, [])
 
-  /* i 番目の音符を塗る */
   const paint = useCallback(
     (i, color) => {
       colorsRef.current[i] = color
-      const el = elemsRef.current[i]
-      if (paintElement(el, color)) return
-      // SVG を直接触れない場合は本来の API に落とす（重いので最後に一度だけ描画）
+      if (paintElement(elemsRef.current[i], color)) return
       const note = notesRef.current[i]
       if (note) {
         note.NoteheadColor = color
@@ -506,7 +554,17 @@ function useScore(song, mode) {
     elemsRef.current.forEach((el) => paintElement(el, COLOR_DEFAULT))
   }, [paintElement])
 
-  /* カーソル移動＋見えていなければスクロール */
+  /* 音符の位置（札を置くための座標） */
+  const anchorOf = useCallback((i) => {
+    const el = elemsRef.current[i]
+    const inner = innerRef.current
+    if (!el || !inner) return null
+    const r = el.getBoundingClientRect()
+    if (!r.width && !r.height) return null
+    const b = inner.getBoundingClientRect()
+    return { left: r.left - b.left + r.width / 2, top: r.top - b.top }
+  }, [])
+
   const cursorTo = useCallback((i) => {
     const osmd = osmdRef.current
     if (!osmd?.cursor) return
@@ -517,15 +575,12 @@ function useScore(song, mode) {
       cursorAtRef.current = i
 
       const el = osmd.cursor.cursorElement
-      const box = hostRef.current?.parentElement
-      if (el && box) {
+      const box = scrollRef.current
+      if (el && box && box.scrollHeight - box.clientHeight > 8) {
         const h = el.offsetHeight || 40
         const top = el.offsetTop
-        const scrollable = box.scrollHeight - box.clientHeight > 8
-        if (scrollable) {
-          if (top < box.scrollTop || top + h > box.scrollTop + box.clientHeight) {
-            box.scrollTo({ top: Math.max(0, top - box.clientHeight / 2 + h / 2), behavior: 'smooth' })
-          }
+        if (top < box.scrollTop || top + h > box.scrollTop + box.clientHeight) {
+          box.scrollTo({ top: Math.max(0, top - box.clientHeight / 2 + h / 2), behavior: 'smooth' })
         }
       }
     } catch {
@@ -533,7 +588,6 @@ function useScore(song, mode) {
     }
   }, [])
 
-  /* 読み込み */
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
@@ -570,6 +624,7 @@ function useScore(song, mode) {
         setTotal(notesRef.current.length)
         osmd.cursor.show()
         setStatus('ready')
+        bumpLayout()
       })
       .catch((e) => {
         if (cancelled) return
@@ -591,7 +646,6 @@ function useScore(song, mode) {
     }
   }, [song, cacheElements])
 
-  /* 向きが変わったら拡大率を変えて描き直し、色とカーソルを戻す */
   useEffect(() => {
     const osmd = osmdRef.current
     if (!osmd || status !== 'ready') return
@@ -602,6 +656,7 @@ function useScore(song, mode) {
         cacheElements()
         repaintAll()
         cursorTo(cursorAtRef.current)
+        bumpLayout()
       } catch (e) {
         console.error('[osmd resize]', e)
       }
@@ -609,7 +664,6 @@ function useScore(song, mode) {
     return () => cancelAnimationFrame(id)
   }, [mode, status, cacheElements, repaintAll, cursorTo])
 
-  /* ブラウザのリサイズで OSMD が自動描画したあとの復旧 */
   useEffect(() => {
     let timer
     const onResize = () => {
@@ -618,6 +672,7 @@ function useScore(song, mode) {
         cacheElements()
         repaintAll()
         cursorTo(cursorAtRef.current)
+        bumpLayout()
       }, 300)
     }
     window.addEventListener('resize', onResize)
@@ -627,7 +682,18 @@ function useScore(song, mode) {
     }
   }, [cacheElements, repaintAll, cursorTo])
 
-  return { hostRef, status, total, paint, resetColors, cursorTo }
+  return {
+    hostRef,
+    innerRef,
+    scrollRef,
+    status,
+    total,
+    layout,
+    paint,
+    resetColors,
+    cursorTo,
+    anchorOf,
+  }
 }
 
 /* ============================================================
@@ -645,7 +711,7 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
 
   const rafRef = useRef(null)
   const phaseRef = useRef('idle')
-  const startAtRef = useRef(0) // t=0 にあたる ctx.currentTime
+  const startAtRef = useRef(0)
   const idxRef = useRef(0)
   const statsRef = useRef(null)
   const verdictsRef = useRef([])
@@ -657,7 +723,6 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
     setPhase(p)
   }, [])
 
-  /* クリック音（1拍ぶんの短い音を予約する） */
   const scheduleClick = useCallback(
     (time, accent) => {
       const ctx = pitch.ctxRef.current
@@ -675,31 +740,58 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
     [pitch.ctxRef]
   )
 
+  const openNote = useCallback((i) => {
+    statsRef.current = { index: i, samples: 0, counts: new Map(), cents: new Map() }
+  }, [])
+
   const finalizeNote = useCallback(
     (i) => {
       const st = statsRef.current
       if (!st || st.index !== i) return
-      let verdict
-      if (st.samples < MIN_SAMPLES) {
-        verdict = 'missed'
-      } else if (st.nameHits / st.samples < NAME_HIT_RATIO) {
-        verdict = 'wrong'
-      } else {
-        const avg = st.centsSum / Math.max(1, st.nameHits)
-        verdict = Math.abs(avg) <= GOOD_CENTS ? 'ok' : avg > 0 ? 'sharp' : 'flat'
+      const expect = timelineRef.current.midis[i]
+      const hits = st.counts.get(expect) ?? 0
+
+      let dominant = expect
+      let best = -1
+      st.counts.forEach((c, midi) => {
+        if (c > best) {
+          best = c
+          dominant = midi
+        }
+      })
+
+      const avgOf = (midi) => {
+        const c = st.counts.get(midi) ?? 0
+        return c ? Math.round((st.cents.get(midi) ?? 0) / c) : null
       }
-      const avgCents = st.nameHits ? Math.round(st.centsSum / st.nameHits) : null
-      verdictsRef.current[i] = { verdict, avgCents }
+
+      let record
+      if (st.samples < MIN_SAMPLES) {
+        record = { verdict: 'missed', avgCents: null, semis: 0, playedName: null }
+      } else if (hits / st.samples < NAME_HIT_RATIO) {
+        record = {
+          verdict: 'wrong',
+          avgCents: avgOf(dominant),
+          semis: dominant - expect,
+          playedName: midiToLabel(dominant),
+        }
+      } else {
+        const avg = avgOf(expect) ?? 0
+        record = {
+          verdict: Math.abs(avg) <= GOOD_CENTS ? 'ok' : avg > 0 ? 'sharp' : 'flat',
+          avgCents: avg,
+          semis: 0,
+          playedName: midiToLabel(expect),
+        }
+      }
+
+      verdictsRef.current[i] = record
       setVerdicts([...verdictsRef.current])
-      score.paint(i, VERDICT[verdict].color)
+      score.paint(i, VERDICT[record.verdict].color)
       statsRef.current = null
     },
     [score]
   )
-
-  const openNote = useCallback((i) => {
-    statsRef.current = { index: i, samples: 0, nameHits: 0, centsSum: 0 }
-  }, [])
 
   const stopSession = useCallback(
     (nextPhase = 'idle') => {
@@ -722,11 +814,14 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
     score.cursorTo(0)
   }, [stopSession, score])
 
-  /* メインループ：AudioContext の時計で進む */
   const loop = useCallback(() => {
     rafRef.current = requestAnimationFrame(loop)
     const ctx = pitch.ctxRef.current
-    if (!ctx) return
+    if (!ctx) {
+      // マイクが閉じられた（バックグラウンド等）
+      stopSession('idle')
+      return
+    }
     const tl = timelineRef.current
     const now = ctx.currentTime
 
@@ -736,7 +831,6 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
       const expect = tl.midis[0]
       if (r && r.midi === expect && Math.abs(r.cents) < 60) {
         if (!armMatchRef.current) armMatchRef.current = now
-        // 100ms 続いたら本物とみなし、鳴り始めた時刻を t=0 にする
         if (now - armMatchRef.current >= 0.1) {
           startAtRef.current = armMatchRef.current
           nextClickRef.current = -Math.round(tl.pickupSec / tl.spb)
@@ -769,12 +863,8 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
     /* --- 演奏中 --- */
     const t = now - startAtRef.current
 
-    // クリック音を先読みで予約（拍の格子は弱起を考慮）
     if (click) {
-      while (
-        startAtRef.current + tl.pickupSec + nextClickRef.current * tl.spb <
-        now + 0.25
-      ) {
+      while (startAtRef.current + tl.pickupSec + nextClickRef.current * tl.spb < now + 0.25) {
         const beatTime = startAtRef.current + tl.pickupSec + nextClickRef.current * tl.spb
         if (beatTime >= now - 0.02 && beatTime <= startAtRef.current + tl.total + 0.1) {
           const beatsPerBar = Math.round(tl.barSec / tl.spb)
@@ -785,7 +875,6 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
       }
     }
 
-    // いま何番目の音か
     let i = idxRef.current
     while (i + 1 < tl.onsets.length && t >= tl.onsets[i + 1]) i += 1
 
@@ -797,7 +886,6 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
       score.cursorTo(i)
     }
 
-    // 評価窓の中だけサンプルを集める
     const st = statsRef.current
     if (st) {
       const rel = t - tl.onsets[i]
@@ -806,13 +894,10 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
         rel >= Math.min(ATTACK_SKIP, dur * 0.3) && rel <= dur - Math.min(RELEASE_SKIP, dur * 0.15)
       if (inWindow) {
         const r = pitch.readingRef.current
-        const fresh = r && now - r.at < 0.12
-        if (fresh) {
+        if (r && now - r.at < 0.12) {
           st.samples += 1
-          if (r.midi === tl.midis[i]) {
-            st.nameHits += 1
-            st.centsSum += r.cents
-          }
+          st.counts.set(r.midi, (st.counts.get(r.midi) ?? 0) + 1)
+          st.cents.set(r.midi, (st.cents.get(r.midi) ?? 0) + r.cents)
         }
       }
     }
@@ -825,7 +910,6 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
 
   const begin = useCallback(async () => {
     if (!pitch.ctxRef.current) await pitch.start()
-    // マイク開始直後は ctx がまだ無いことがあるので次フレームで判断する
     requestAnimationFrame(() => {
       const ctx = pitch.ctxRef.current
       if (!ctx) return
@@ -842,7 +926,6 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
         const beatsPerBar = Math.round(tl.barSec / tl.spb)
         const lead = 0.3
         const downbeat = ctx.currentTime + lead + beatsPerBar * tl.spb
-        // t=0（最初の音）は弱起のぶんだけ小節線より前
         startAtRef.current = downbeat - tl.pickupSec
         nextClickRef.current = 0
         for (let k = 0; k < beatsPerBar; k++) {
@@ -859,7 +942,6 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
 
   useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
 
-  /* 曲・テンポが変わったら演奏はいったん止める */
   useEffect(() => {
     stopSession('idle')
     idxRef.current = 0
@@ -872,8 +954,10 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
     const done = verdicts.filter(Boolean)
     if (!done.length) return null
     const ok = done.filter((v) => v.verdict === 'ok').length
-    const cents = done.filter((v) => v.avgCents != null).map((v) => v.avgCents)
-    const avg = cents.length ? Math.round(cents.reduce((a, b) => a + b, 0) / cents.length) : null
+    const tuned = done.filter((v) => v.verdict !== 'missed' && v.avgCents != null && !v.semis)
+    const avg = tuned.length
+      ? Math.round(tuned.reduce((a, b) => a + b.avgCents, 0) / tuned.length)
+      : null
     return { ok, total: done.length, avg }
   }, [verdicts])
 
@@ -913,7 +997,7 @@ function TunerMeter({ cents, active }) {
 export default function App() {
   const [songId, setSongId] = useState(SONGS[0].id)
   const [a4, setA4] = useState(440)
-  const [startMode, setStartMode] = useState('listen') // listen | countin
+  const [startMode, setStartMode] = useState('listen')
   const [click, setClick] = useState(true)
   const song = useMemo(() => SONGS.find((s) => s.id === songId), [songId])
   const [bpm, setBpm] = useState(song.bpm)
@@ -931,6 +1015,20 @@ export default function App() {
   const playing = session.phase === 'playing'
   const busy = session.phase !== 'idle' && session.phase !== 'done'
 
+  /* 外れた音符の上に置く札の位置を計算する */
+  const [badges, setBadges] = useState([])
+  useLayoutEffect(() => {
+    const next = []
+    session.verdicts.forEach((v, i) => {
+      const b = badgeOf(v)
+      if (!b) return
+      const a = score.anchorOf(i)
+      if (!a) return
+      next.push({ i, ...b, left: a.left, top: a.top })
+    })
+    setBadges(next)
+  }, [session.verdicts, score, score.layout, mode])
+
   const primaryLabel = {
     idle: '演奏を始める',
     armed: `${song.notes[0].n} を待っています`,
@@ -940,11 +1038,8 @@ export default function App() {
   }[session.phase]
 
   const onPrimary = () => {
-    if (session.phase === 'playing' || session.phase === 'armed' || session.phase === 'countin') {
-      session.stop()
-    } else {
-      session.begin()
-    }
+    if (busy) session.stop()
+    else session.begin()
   }
 
   return (
@@ -1002,8 +1097,24 @@ export default function App() {
       <section className="block score-area">
         <h2 className="label">楽譜</h2>
 
-        <div className="score" data-playing={playing}>
-          <div ref={score.hostRef} className="score-host" />
+        <div className="score" data-playing={playing} ref={score.scrollRef}>
+          <div className="score-inner" ref={score.innerRef}>
+            <div ref={score.hostRef} className="score-host" />
+            <div className="marks" aria-hidden="true">
+              {badges.map((b) => (
+                <span
+                  key={b.i}
+                  className="mark"
+                  data-dir={b.dir}
+                  title={b.title}
+                  style={{ left: `${b.left}px`, top: `${b.top}px`, '--c': b.color }}
+                >
+                  <span className="mark-arrow">{b.dir === 'up' ? '▲' : '▼'}</span>
+                  {b.text}
+                </span>
+              ))}
+            </div>
+          </div>
           {score.status === 'loading' && <p className="score-msg">楽譜を組み立てています…</p>}
           {score.status === 'error' && (
             <p className="score-msg error">
@@ -1055,7 +1166,8 @@ export default function App() {
         )}
 
         <p className="hint rotate-hint">
-          緑＝合格、黄＝音名は合っているが音程が甘い、赤＝違う音、灰＝鳴っていない。
+          緑＝合格、黄＝音程が甘い、赤＝違う音、灰＝鳴っていない。外れた音符には
+          ▲（高い）▼（低い）と外れ幅が付きます。
         </p>
       </section>
 
@@ -1087,6 +1199,9 @@ export default function App() {
         </div>
 
         {pitch.error && <p className="error">{pitch.error}</p>}
+        {pitch.autoStopped && !pitch.running && (
+          <p className="notice">画面を離れたのでマイクを閉じました。もう一度押すと再開します。</p>
+        )}
 
         <div className="controls">
           <button className="mic" data-phase={session.phase} onClick={onPrimary}>
@@ -1221,6 +1336,7 @@ body {
   transition: border-color .2s;
 }
 .score[data-playing="true"] { border-color: var(--accent); }
+.score-inner { position: relative; width: 100%; }
 .score-host { width: 100%; }
 .score-host svg { display: block; max-width: 100%; height: auto; }
 .score-msg {
@@ -1236,6 +1352,28 @@ body {
   border-radius: 14px;
 }
 .score-msg.error { color: var(--off); padding: 0 24px; text-align: center; }
+
+/* 外れ方の札 */
+.marks { position: absolute; inset: 0; pointer-events: none; }
+.mark {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  margin-top: -3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--c) 12%, #fff);
+  border: 1px solid color-mix(in srgb, var(--c) 45%, #fff);
+  color: var(--c);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.mark-arrow { font-size: 8px; }
 
 .score-controls {
   margin-top: 12px;
@@ -1368,6 +1506,7 @@ body {
   border-radius: 8px; background: var(--paper); color: var(--ink);
 }
 .error { margin: 14px 0 0; font-size: 12px; color: var(--off); line-height: 1.6; }
+.notice { margin: 12px 0 0; font-size: 11px; color: var(--ink-60); line-height: 1.6; }
 .foot { font-size: 11px; color: var(--ink-30); text-align: center; }
 
 button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -1437,6 +1576,6 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
   .reset { padding: 0 10px; font-size: 11px; border-radius: 10px; }
   .a4 { margin-top: 8px; font-size: 10px; }
   .a4 select { font-size: 11px; padding: 4px 6px; }
-  .error { margin-top: 8px; font-size: 10px; }
+  .error, .notice { margin-top: 8px; font-size: 10px; }
 }
 `

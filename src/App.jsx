@@ -3,10 +3,10 @@ import { PitchDetector } from 'pitchy'
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
 
 /* ============================================================
- *  pitch-rec — Step 2: 五線譜表示（マイクとの同期はまだナシ）
- *  - 曲データ（音名配列）→ MusicXML を生成 → OSMD で描画
- *  - カーソル移動と赤色化は手動ボタンで動作確認できる
- *  - Step 3 でこのカーソルと判定結果をマイク入力に繋ぐ
+ *  pitch-rec — Step 2.5: 横画面レイアウト対応
+ *  - 縦：譜面が主役の1カラム
+ *  - 横（スマホ横持ち）：譜面を全幅で大きく、右にチューナーを寄せる
+ *    向きが変わったら zoom を変えて再描画し、先の小節まで見えるようにする
  * ============================================================ */
 
 /* ---------- 音名ユーティリティ ---------- */
@@ -249,9 +249,35 @@ const IN_TUNE_CENTS = 8
 const COLOR_DEFAULT = '#10131c'
 const COLOR_WRONG = '#d5342b'
 
+/* 縦横で譜面の拡大率を変える。横は小さめにして先の小節まで入れる */
+const ZOOM = { portrait: 0.72, landscape: 0.58 }
+
 function median(arr) {
   const s = [...arr].sort((a, b) => a - b)
   return s[Math.floor(s.length / 2)]
+}
+
+/* ============================================================
+ *  画面の向き（スマホ横持ちだけを landscape とみなす）
+ *  CSS 側の @media (orientation: landscape) and (max-height: 560px) と対で使う
+ * ============================================================ */
+const LANDSCAPE_QUERY = '(orientation: landscape) and (max-height: 560px)'
+
+function useLayoutMode() {
+  const [mode, setMode] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia(LANDSCAPE_QUERY).matches
+      ? 'landscape'
+      : 'portrait'
+  )
+
+  useEffect(() => {
+    const mql = window.matchMedia(LANDSCAPE_QUERY)
+    const onChange = (e) => setMode(e.matches ? 'landscape' : 'portrait')
+    mql.addEventListener('change', onChange)
+    return () => mql.removeEventListener('change', onChange)
+  }, [])
+
+  return mode
 }
 
 /* ============================================================
@@ -363,15 +389,32 @@ function usePitch(a4) {
 /* ============================================================
  *  楽譜（OpenSheetMusicDisplay）
  * ============================================================ */
-function useScore(song) {
+function useScore(song, mode) {
   const hostRef = useRef(null)
   const osmdRef = useRef(null)
   const notesRef = useRef([])
+  const indexRef = useRef(0)
   const [status, setStatus] = useState('loading') // loading | ready | error
   const [index, setIndex] = useState(0)
   const [total, setTotal] = useState(0)
   const [wrong, setWrong] = useState(() => new Set())
+  const modeRef = useRef(mode)
+  modeRef.current = mode
 
+  /* カーソルを i 番目の音符へ置く */
+  const placeCursor = useCallback((i) => {
+    const osmd = osmdRef.current
+    if (!osmd?.cursor) return
+    try {
+      osmd.cursor.reset()
+      for (let k = 0; k < i; k++) osmd.cursor.next()
+      osmd.cursor.show()
+    } catch {
+      /* 再描画中は無視 */
+    }
+  }, [])
+
+  /* 読み込み（曲が変わったときだけ） */
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
@@ -379,6 +422,7 @@ function useScore(song) {
 
     setStatus('loading')
     setIndex(0)
+    indexRef.current = 0
     setWrong(new Set())
     host.innerHTML = ''
 
@@ -401,7 +445,7 @@ function useScore(song) {
       .load(buildMusicXML(song))
       .then(() => {
         if (cancelled) return
-        osmd.zoom = 0.72
+        osmd.zoom = ZOOM[modeRef.current]
         osmd.render()
         notesRef.current = flattenNotes(osmd)
         setTotal(notesRef.current.length)
@@ -427,32 +471,55 @@ function useScore(song) {
     }
   }, [song])
 
-  /* カーソルを i 番目の音符へ置く */
-  const placeCursor = useCallback((i) => {
+  /* 向きが変わったら拡大率を変えて描き直す */
+  useEffect(() => {
     const osmd = osmdRef.current
-    if (!osmd?.cursor) return
-    osmd.cursor.reset()
-    for (let k = 0; k < i; k++) osmd.cursor.next()
-    osmd.cursor.show()
-  }, [])
+    if (!osmd || status !== 'ready') return
+    const id = requestAnimationFrame(() => {
+      try {
+        osmd.zoom = ZOOM[mode]
+        osmd.render()
+        placeCursor(indexRef.current)
+      } catch (e) {
+        console.error('[osmd resize]', e)
+      }
+    })
+    return () => cancelAnimationFrame(id)
+  }, [mode, status, placeCursor])
+
+  /* OSMD の自動リサイズ後にカーソルが消えるので置き直す */
+  useEffect(() => {
+    let timer
+    const onResize = () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => placeCursor(indexRef.current), 300)
+    }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      clearTimeout(timer)
+    }
+  }, [placeCursor])
 
   const move = useCallback(
     (delta) => {
       const max = Math.max(0, notesRef.current.length - 1)
-      const next = Math.min(max, Math.max(0, index + delta))
+      const next = Math.min(max, Math.max(0, indexRef.current + delta))
+      indexRef.current = next
       placeCursor(next)
       setIndex(next)
     },
-    [index, placeCursor]
+    [placeCursor]
   )
 
   /* 間違い印（赤）の付け外し。色を変えたら再描画が必要 */
   const toggleWrong = useCallback(() => {
     const osmd = osmdRef.current
     if (!osmd) return
+    const at = indexRef.current
     const next = new Set(wrong)
-    if (next.has(index)) next.delete(index)
-    else next.add(index)
+    if (next.has(at)) next.delete(at)
+    else next.add(at)
 
     notesRef.current.forEach((note, i) => {
       const color = next.has(i) ? COLOR_WRONG : COLOR_DEFAULT
@@ -460,9 +527,9 @@ function useScore(song) {
       note.StemColorXml = color
     })
     osmd.render()
-    placeCursor(index)
+    placeCursor(at)
     setWrong(next)
-  }, [index, wrong, placeCursor])
+  }, [wrong, placeCursor])
 
   return { hostRef, status, index, total, wrong, move, toggleWrong }
 }
@@ -502,15 +569,16 @@ export default function App() {
   const [a4, setA4] = useState(440)
   const song = useMemo(() => SONGS.find((s) => s.id === songId), [songId])
 
+  const mode = useLayoutMode()
   const { running, error, reading, level, start, stop } = usePitch(a4)
-  const score = useScore(song)
+  const score = useScore(song, mode)
 
   const active = running && !!reading
   const inTune = active && Math.abs(reading.cents) <= IN_TUNE_CENTS
   const targetNote = song.notes[score.index]?.n ?? '—'
 
   return (
-    <div className="app" data-state={!active ? 'idle' : inTune ? 'ok' : 'off'}>
+    <div className="app" data-state={!active ? 'idle' : inTune ? 'ok' : 'off'} data-mode={mode}>
       <style>{CSS}</style>
 
       <header className="head">
@@ -518,10 +586,20 @@ export default function App() {
           <span className="clef">𝄞</span> pitch-rec
         </h1>
         <p className="head-sub">単音・リアルタイム音程チェック</p>
+        {/* 横画面ではカードの代わりにこれを出す */}
+        <label className="songs-select">
+          <select value={songId} onChange={(e) => setSongId(e.target.value)} aria-label="曲を選ぶ">
+            {SONGS.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.title}（{s.keyName} {s.time[0]}/{s.time[1]}）
+              </option>
+            ))}
+          </select>
+        </label>
       </header>
 
       {/* 上：曲を選ぶ */}
-      <section className="block">
+      <section className="block songs">
         <h2 className="label">曲を選ぶ</h2>
         <div className="cards" role="radiogroup" aria-label="デモ曲">
           {SONGS.map((s) => (
@@ -546,13 +624,8 @@ export default function App() {
       </section>
 
       {/* 真ん中：楽譜 */}
-      <section className="block">
-        <h2 className="label">
-          楽譜
-          <span className="tag">
-            {score.status === 'ready' ? `${score.index + 1} / ${score.total} 音目` : '読み込み中'}
-          </span>
-        </h2>
+      <section className="block score-area">
+        <h2 className="label">楽譜</h2>
 
         <div className="score">
           <div ref={score.hostRef} className="score-host" />
@@ -565,6 +638,9 @@ export default function App() {
         </div>
 
         <div className="score-controls">
+          <span className="score-count">
+            {score.status === 'ready' ? `${score.index + 1} / ${score.total}` : '…'}
+          </span>
           <button onClick={() => score.move(-1)} disabled={score.index === 0}>
             前の音
           </button>
@@ -576,15 +652,15 @@ export default function App() {
             data-on={score.wrong.has(score.index)}
             onClick={score.toggleWrong}
           >
-            {score.wrong.has(score.index) ? '赤を消す' : 'この音を赤くする'}
+            {score.wrong.has(score.index) ? '赤を消す' : '赤くする'}
           </button>
         </div>
-        <p className="hint">
-          いまは手動でカーソルを動かす確認用です。Step 3 でマイクの音と繋ぎます。
+        <p className="hint rotate-hint">
+          横向きにすると譜面が広がり、先の小節まで見えます。カーソル移動は今のところ手動です。
         </p>
       </section>
 
-      {/* 下：マイクと音名 */}
+      {/* 下（横画面では右）：マイクと音名 */}
       <section className="block readout-block">
         <div className="readout">
           <div className="note">
@@ -596,7 +672,7 @@ export default function App() {
           </div>
           <div className="freq">
             {active
-              ? `${reading.freq.toFixed(1)} Hz　／　譜面上の音 ${targetNote}`
+              ? `${reading.freq.toFixed(1)} Hz　／　譜面 ${targetNote}`
               : running
                 ? '音を待っています'
                 : 'マイクは停止中'}
@@ -616,7 +692,7 @@ export default function App() {
             {running ? 'マイクを止める' : 'マイクを使って始める'}
           </button>
           <label className="a4">
-            基準 A
+            <span>基準 A</span>
             <select value={a4} onChange={(e) => setA4(Number(e.target.value))}>
               <option value={440}>440 Hz</option>
               <option value={441}>441 Hz</option>
@@ -657,6 +733,7 @@ body {
   color: var(--ink);
   font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
 }
 .app {
   max-width: 480px;
@@ -679,6 +756,7 @@ body {
 }
 .head .clef { font-size: 26px; margin-right: 4px; }
 .head-sub { margin: 4px 0 0; font-size: 12px; color: var(--ink-60); }
+.songs-select { display: none; }
 
 .label {
   margin: 0 0 10px;
@@ -689,16 +767,6 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-.tag {
-  font-weight: 500;
-  letter-spacing: 0;
-  font-size: 10px;
-  color: var(--accent);
-  background: #eef0f9;
-  border-radius: 999px;
-  padding: 2px 8px;
-  font-variant-numeric: tabular-nums;
 }
 
 /* 曲カード */
@@ -762,7 +830,18 @@ body {
 }
 .score-msg.error { color: var(--off); padding: 0 24px; text-align: center; }
 
-.score-controls { margin-top: 12px; display: flex; gap: 8px; }
+.score-controls { margin-top: 12px; display: flex; gap: 8px; align-items: stretch; }
+.score-count {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--accent);
+  background: #eef0f9;
+  border-radius: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .score-controls button {
   flex: 1;
   padding: 10px 4px;
@@ -774,7 +853,7 @@ body {
   cursor: pointer;
 }
 .score-controls button:disabled { color: var(--ink-30); cursor: default; }
-.score-controls .ghost { flex: 1.3; color: var(--off); border-color: #f0d5d3; }
+.score-controls .ghost { color: var(--off); border-color: #f0d5d3; }
 .score-controls .ghost[data-on="true"] { background: var(--off); border-color: var(--off); color: #fff; }
 
 /* 音名表示 */
@@ -804,13 +883,13 @@ body {
   position: absolute; bottom: 0; width: 1px; height: 8px;
   background: var(--ink-30); transform: translateX(-50%);
 }
-.tick[data-center="true"] { height: 44px; background: var(--line); }
+.tick[data-center="true"] { height: 100%; background: var(--line); }
 .meter-zone {
-  position: absolute; bottom: 0; left: 42%; width: 16%; height: 44px;
+  position: absolute; bottom: 0; left: 42%; width: 16%; height: 100%;
   background: rgba(15,138,69,.07);
 }
 .needle {
-  position: absolute; bottom: 0; width: 2px; height: 44px;
+  position: absolute; bottom: 0; width: 2px; height: 100%;
   background: var(--ink-30); transform: translateX(-50%);
   transition: left .07s linear, background .12s; border-radius: 1px;
 }
@@ -841,4 +920,101 @@ body {
 
 button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* ============================================================
+ *  横画面（スマホ横持ち）
+ *  譜面を左いっぱいに広げ、チューナーは右の細い柱にまとめる
+ * ============================================================ */
+@media (orientation: landscape) and (max-height: 560px) {
+  body { background: var(--paper); }
+  .app {
+    max-width: none;
+    height: 100vh;
+    height: 100dvh;
+    padding:
+      6px
+      calc(12px + env(safe-area-inset-right))
+      calc(6px + env(safe-area-inset-bottom))
+      calc(12px + env(safe-area-inset-left));
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 180px;
+    grid-template-rows: auto minmax(0, 1fr);
+    column-gap: 14px;
+    row-gap: 6px;
+    overflow: hidden;
+  }
+
+  /* ヘッダーは1行に圧縮。曲選択はここのセレクトへ */
+  .head {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .head h1 { font-size: 15px; }
+  .head .clef { font-size: 18px; }
+  .head-sub { display: none; }
+  .songs-select { display: block; margin-left: auto; }
+  .songs-select select {
+    font-size: 12px;
+    padding: 5px 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--paper);
+    color: var(--ink);
+    max-width: 46vw;
+  }
+
+  /* 縦向き専用の要素は畳む */
+  .songs, .foot, .rotate-hint, .label { display: none; }
+
+  /* 譜面 */
+  .score-area {
+    grid-column: 1;
+    grid-row: 2;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .score {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: 10px;
+    padding: 6px 4px;
+  }
+  .score-controls { margin-top: 6px; gap: 6px; }
+  .score-controls button { padding: 7px 2px; font-size: 11px; }
+  .score-count { font-size: 11px; padding: 0 8px; }
+
+  /* 右の柱 */
+  .readout-block {
+    grid-column: 2;
+    grid-row: 2;
+    min-height: 0;
+    border-top: 0;
+    padding-top: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .note-name { font-size: 46px; }
+  .note-name sup { font-size: 20px; }
+  .note-oct { font-size: 18px; }
+  .freq { margin-top: 2px; font-size: 10px; }
+  .meter { margin-top: 12px; }
+  .meter-scale { height: 26px; }
+  .meter-labels { font-size: 9px; margin-top: 4px; }
+  .level { margin-top: 8px; }
+  .controls {
+    margin-top: 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .mic { padding: 11px; font-size: 13px; border-radius: 10px; }
+  .a4 { flex-direction: row; align-items: center; justify-content: space-between; }
+  .error { margin-top: 8px; font-size: 10px; }
+}
 `

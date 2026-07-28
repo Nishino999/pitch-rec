@@ -1,4 +1,5 @@
 import {
+  Component,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -322,6 +323,25 @@ function badgeOf(v) {
     }
   }
   return null
+}
+
+/* 札の中身が同じかどうか（再レンダーを止めるために使う） */
+function sameBadges(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]
+    const y = b[i]
+    if (
+      x.i !== y.i ||
+      x.text !== y.text ||
+      x.dir !== y.dir ||
+      Math.abs(x.left - y.left) > 0.5 ||
+      Math.abs(x.top - y.top) > 0.5
+    ) {
+      return false
+    }
+  }
+  return true
 }
 
 /* ============================================================
@@ -992,9 +1012,51 @@ function TunerMeter({ cents, active }) {
 }
 
 /* ============================================================
+ *  エラー境界
+ *  何かで落ちても真っ白にせず、原因を画面に出す
+ * ============================================================ */
+class Boundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, info) {
+    console.error('[pitch-rec]', error, info)
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="crash">
+          <style>{CSS}</style>
+          <h2>アプリを表示できませんでした</h2>
+          <p>読み込み直すと復帰することがあります。</p>
+          <pre>{String(this.state.error?.message ?? this.state.error)}</pre>
+          <button onClick={() => window.location.reload()}>読み込み直す</button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+export default function App() {
+  return (
+    <Boundary>
+      <Studio />
+    </Boundary>
+  )
+}
+
+/* ============================================================
  *  アプリ本体
  * ============================================================ */
-export default function App() {
+function Studio() {
   const [songId, setSongId] = useState(SONGS[0].id)
   const [a4, setA4] = useState(440)
   const [startMode, setStartMode] = useState('listen')
@@ -1015,19 +1077,31 @@ export default function App() {
   const playing = session.phase === 'playing'
   const busy = session.phase !== 'idle' && session.phase !== 'done'
 
-  /* 外れた音符の上に置く札の位置を計算する */
+  /* 外れた音符の上に置く札の位置を計算する
+   * 依存に score オブジェクトそのものを入れると、毎レンダーで新しい参照になり
+   * setBadges → 再レンダー → 依存が変わる…の無限ループになる。
+   * 中身が同じときは前の配列を返して再レンダーを止める。 */
   const [badges, setBadges] = useState([])
+  const anchorOf = score.anchorOf
+  const layout = score.layout
+  const verdicts = session.verdicts
+
   useLayoutEffect(() => {
     const next = []
-    session.verdicts.forEach((v, i) => {
+    verdicts.forEach((v, i) => {
       const b = badgeOf(v)
       if (!b) return
-      const a = score.anchorOf(i)
+      let a = null
+      try {
+        a = anchorOf(i)
+      } catch {
+        a = null
+      }
       if (!a) return
       next.push({ i, ...b, left: a.left, top: a.top })
     })
-    setBadges(next)
-  }, [session.verdicts, score, score.layout, mode])
+    setBadges((prev) => (sameBadges(prev, next) ? prev : next))
+  }, [verdicts, anchorOf, layout, mode])
 
   const primaryLabel = {
     idle: '演奏を始める',
@@ -1364,9 +1438,10 @@ body {
   gap: 1px;
   padding: 1px 5px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--c) 12%, #fff);
-  border: 1px solid color-mix(in srgb, var(--c) 45%, #fff);
+  background: #fff;
+  border: 1px solid var(--c);
   color: var(--c);
+  box-shadow: 0 1px 3px rgba(16,19,28,.12);
   font-size: 10px;
   font-weight: 700;
   line-height: 1.5;
@@ -1508,6 +1583,22 @@ body {
 .error { margin: 14px 0 0; font-size: 12px; color: var(--off); line-height: 1.6; }
 .notice { margin: 12px 0 0; font-size: 11px; color: var(--ink-60); line-height: 1.6; }
 .foot { font-size: 11px; color: var(--ink-30); text-align: center; }
+
+/* クラッシュ画面 */
+.crash {
+  max-width: 480px; margin: 0 auto; padding: 40px 20px;
+  background: var(--paper); min-height: 100%;
+}
+.crash h2 { font-size: 17px; margin: 0 0 8px; }
+.crash p { font-size: 13px; color: var(--ink-60); margin: 0 0 14px; }
+.crash pre {
+  font-size: 11px; color: var(--off); background: var(--paper-2);
+  padding: 10px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word;
+}
+.crash button {
+  margin-top: 14px; padding: 12px 18px; border: 0; border-radius: 12px;
+  background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+}
 
 button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

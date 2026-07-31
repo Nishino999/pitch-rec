@@ -12,15 +12,15 @@ import { PitchDetector } from 'pitchy'
 import { OpenSheetMusicDisplay, GraphicalNote } from 'opensheetmusicdisplay'
 
 /* ============================================================
- *  pitch-rec — Step 4
- *   - 高い＝赤 / 低い＝青 に統一（譜面・音名・チューナーの針すべて）
- *   - メトロノーム（開始・停止、BPM 1刻み、拍子切替、拍の点灯）
- *   - 拍子を変えると小節線を引き直す（またぐ音符はタイで分割）
- *   - クリック音がマイクに回り込む区間は検出を止める
+ *  pitch-rec — Step 5
+ *   タブで2つのモードを切り替える
+ *    ・練習     … デモ曲を弾いて判定してもらう（従来）
+ *    ・フリー演奏 … 弾いた音を録って、そこから譜面を起こす
  * ============================================================ */
 
 /* ---------- 音名ユーティリティ ---------- */
 const SHARP_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+const FLAT_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B']
 
 function parseNote(name) {
   const m = /^([A-G])(#|b)?(-?\d)$/.exec(name)
@@ -46,8 +46,42 @@ function midiToLabel(midi) {
   return `${name}${octave}`
 }
 
+/* 調号に合わせて ♯ か ♭ で綴る */
+function midiToLabelIn(midi, fifths) {
+  const n = Math.round(midi)
+  const pc = ((n % 12) + 12) % 12
+  const octave = Math.floor(n / 12) - 1
+  return `${(fifths < 0 ? FLAT_NAMES : SHARP_NAMES)[pc]}${octave}`
+}
+
 function freqToMidiFloat(freq, a4) {
   return 69 + 12 * Math.log2(freq / a4)
+}
+
+/* 使われた音から調号を推定する。
+ * ① 音階から外れる音がいちばん少ない調に絞り、
+ * ② その中で主音と属音がよく出てくる調を選ぶ（旋律の重心を見る）、
+ * ③ それでも並んだら調号の少ない方。 */
+const MAJOR_STEPS = [0, 2, 4, 5, 7, 9, 11]
+
+function guessFifths(midis) {
+  if (!midis.length) return 0
+  const count = new Array(12).fill(0)
+  midis.forEach((m) => {
+    count[((m % 12) + 12) % 12] += 1
+  })
+  const used = count.map((c, pc) => (c ? pc : -1)).filter((pc) => pc >= 0)
+
+  const scored = []
+  for (let f = -4; f <= 5; f++) {
+    const tonic = (((7 * f) % 12) + 12) % 12
+    const dominant = (tonic + 7) % 12
+    const scale = new Set(MAJOR_STEPS.map((st) => (tonic + st) % 12))
+    const miss = used.filter((pc) => !scale.has(pc)).length
+    scored.push({ f, miss, weight: count[tonic] * 2 + count[dominant] })
+  }
+  scored.sort((a, b) => a.miss - b.miss || b.weight - a.weight || Math.abs(a.f) - Math.abs(b.f))
+  return scored[0].f
 }
 
 /* ---------- デモ曲（すべてパブリックドメイン） ---------- */
@@ -139,12 +173,25 @@ const TIME_OPTIONS = [
   { id: '6/8', beats: 6, beatType: 8 },
 ]
 
+const KEY_NAMES = {
+  '-4': '変イ長調 ♭4',
+  '-3': '変ホ長調 ♭3',
+  '-2': '変ロ長調 ♭2',
+  '-1': 'ヘ長調 ♭1',
+  0: 'ハ長調',
+  1: 'ト長調 ♯1',
+  2: 'ニ長調 ♯2',
+  3: 'イ長調 ♯3',
+  4: 'ホ長調 ♯4',
+  5: 'ロ長調 ♯5',
+}
+
 const sigId = (t) => `${t.beats}/${t.beatType}`
 
 /* ============================================================
  *  MusicXML 生成
- *  4分音符 = divisions 4。拍子が変わったら小節線を引き直し、
- *  小節をまたぐ音符はタイで分割する。
+ *  4分音符 = divisions 4。小節をまたぐ音符はタイで分割する。
+ *  notes の要素は { n, d } か { rest: true, d }
  * ============================================================ */
 const DIVISIONS = 4
 
@@ -160,7 +207,6 @@ const TYPE_TABLE = [
   [0.25, '16th', 0],
 ]
 
-/* 任意の長さを、書ける音符の並びに崩す（2.5 → 2 + 0.5） */
 function decompose(d) {
   const out = []
   let rest = d
@@ -180,8 +226,22 @@ function durationToType(d) {
 }
 
 function pieceXML(piece) {
-  const p = parseNote(piece.note.n)
   const { type, dots } = durationToType(piece.dur)
+  const dur = `        <duration>${Math.round(piece.dur * DIVISIONS)}</duration>`
+
+  if (piece.rest) {
+    return [
+      '      <note>',
+      '        <rest/>',
+      dur,
+      '        <voice>1</voice>',
+      `        <type>${type}</type>`,
+      ...Array.from({ length: dots }, () => '        <dot/>'),
+      '      </note>',
+    ].join('\n')
+  }
+
+  const p = parseNote(piece.name)
   const ties = []
   const tied = []
   if (piece.tieStop) {
@@ -199,7 +259,7 @@ function pieceXML(piece) {
     p.alter ? `          <alter>${p.alter}</alter>` : null,
     `          <octave>${p.octave}</octave>`,
     '        </pitch>',
-    `        <duration>${Math.round(piece.dur * DIVISIONS)}</duration>`,
+    dur,
     ...ties,
     '        <voice>1</voice>',
     `        <type>${type}</type>`,
@@ -213,11 +273,11 @@ function pieceXML(piece) {
     .join('\n')
 }
 
-/* 戻り値の map[i] は「曲データの i 番目の音」が
- * 譜面上のどの音符（複数になりうる）に対応するかの対応表 */
-function buildScore(song, time) {
+/* map[i] は「曲データの i 番目」が譜面上のどの音符に対応するかの対応表。
+ * 休符は音符として数えない（OSMD 側の一覧が休符を含まないため） */
+function buildScore(piece, time) {
   const barQ = time.beats * (4 / time.beatType)
-  const pickupQ = Math.min(song.pickup, barQ)
+  const pickupQ = Math.min(piece.pickup ?? 0, barQ)
 
   const measures = []
   let bar = []
@@ -233,20 +293,23 @@ function buildScore(song, time) {
     limit = barQ
   }
 
-  song.notes.forEach((nt, si) => {
+  piece.notes.forEach((nt, si) => {
     map[si] = []
     let remaining = nt.d
     let first = true
     let guard = 0
-    while (remaining > 1e-6 && guard++ < 32) {
+    while (remaining > 1e-6 && guard++ < 64) {
       if (limit - filled < 1e-6) closeBar()
       const take = Math.min(remaining, limit - filled)
       const restAfter = remaining - take
-      const pieces = decompose(take)
-      pieces.forEach((dur, pi) => {
-        const more = pi < pieces.length - 1 || restAfter > 1e-6
-        bar.push({ note: nt, dur, tieStop: !first, tieStart: more })
-        map[si].push(gIndex++)
+      decompose(take).forEach((dur, pi, arr) => {
+        const more = pi < arr.length - 1 || restAfter > 1e-6
+        if (nt.rest) {
+          bar.push({ rest: true, dur })
+        } else {
+          bar.push({ name: nt.n, dur, tieStop: !first, tieStart: more })
+          map[si].push(gIndex++)
+        }
         first = false
       })
       filled += take
@@ -264,7 +327,7 @@ function buildScore(song, time) {
           ? [
               '      <attributes>',
               `        <divisions>${DIVISIONS}</divisions>`,
-              `        <key><fifths>${song.fifths}</fifths><mode>major</mode></key>`,
+              `        <key><fifths>${piece.fifths}</fifths><mode>major</mode></key>`,
               `        <time><beats>${time.beats}</beats><beat-type>${time.beatType}</beat-type></time>`,
               '        <clef><sign>G</sign><line>2</line></clef>',
               '      </attributes>',
@@ -284,7 +347,7 @@ function buildScore(song, time) {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
 <score-partwise version="4.0">
-  <work><work-title>${song.title}</work-title></work>
+  <work><work-title>${piece.title}</work-title></work>
   <part-list>
     <score-part id="P1"><part-name>Violin</part-name></score-part>
   </part-list>
@@ -296,12 +359,10 @@ ${body}
   return { xml, map }
 }
 
-/* ---------- 曲の時間割 ----------
- * bpm は「拍子の分母の音符」いくつ分かで数える（6/8 なら8分音符）
- */
+/* ---------- 曲の時間割 ---------- */
 function buildTimeline(song, bpm, time) {
   const secPerBeat = 60 / bpm
-  const beatQ = 4 / time.beatType // 1拍が4分音符いくつぶんか
+  const beatQ = 4 / time.beatType
   const quarterSec = secPerBeat / beatQ
 
   const onsets = []
@@ -354,17 +415,22 @@ const MIN_SAMPLES = 3
 const NAME_HIT_RATIO = 0.5
 const GOOD_CENTS = 15
 
-/* ---------- クリック音の回り込み対策 ----------
- * スピーカーから出た音がマイクに戻るまでの遅れを見込んで、
- * クリックの前後は検出そのものを止める
- */
+/* ---------- 採譜パラメータ ---------- */
+const SEG_CONFIRM = 3 // 音が変わったと認めるのに要るフレーム数
+const SEG_MIN_SEC = 0.1 // これより短い音は捨てる
+const SEG_GAP = 0.07 // 無音がこれ以上続いたら音の切れ目（弓の返しを拾うため短め）
+const SEG_BRIDGE = 0.09 // クリックで検出を止めた区間を「音が続いていた」とみなす上限
+const REST_MIN_UNITS = 2 // 16分音符いくつぶん空いたら休符にするか（それ未満は前の音を伸ばす）
+const REC_MAX_SEC = 180
+
+/* ---------- クリック音の回り込み対策 ---------- */
 const BLANK_BEFORE = 0.015
-const BLANK_AFTER = 0.11
+const BLANK_AFTER = 0.03
 
 const COLOR = {
   ok: '#0f8a45',
-  high: '#d5342b', // 高い＝赤
-  low: '#1f5fd0', // 低い＝青
+  high: '#d5342b',
+  low: '#1f5fd0',
   missed: '#b9bcc6',
   ink: '#10131c',
 }
@@ -376,7 +442,6 @@ function median(arr) {
   return s[Math.floor(s.length / 2)]
 }
 
-/* ---------- 外れ方の札 ---------- */
 function badgeOf(v) {
   if (!v || v.verdict === 'ok' || v.verdict === 'missed') return null
   const up = v.verdict === 'high'
@@ -428,7 +493,7 @@ function useLayoutMode() {
 }
 
 /* ============================================================
- *  音声の土台（マイクとメトロノームで同じ時計を使う）
+ *  音声の土台
  * ============================================================ */
 function useAudio() {
   const ctxRef = useRef(null)
@@ -515,7 +580,6 @@ function usePitch(a4, audio, blankRef) {
         if (ctx.state === 'closed') return
 
         const audioNow = ctx.currentTime
-        // クリック音が回り込んでいる間は何も見ない
         const blanked = blankRef.current.some(
           (ct) => audioNow >= ct - BLANK_BEFORE && audioNow <= ct + BLANK_AFTER
         )
@@ -579,8 +643,6 @@ function usePitch(a4, audio, blankRef) {
 
 /* ============================================================
  *  メトロノーム
- *  鳴らす時刻を先に予約する。予約した時刻は blankRef に積んで
- *  ピッチ検出側に「この間は聴かないで」と伝える。
  * ============================================================ */
 function useMetronome(audio, bpm, time, blankRef) {
   const [running, setRunning] = useState(false)
@@ -597,13 +659,13 @@ function useMetronome(audio, bpm, time, blankRef) {
     (t, accent) => {
       const ctx = audio.ctxRef.current
       if (!ctx) return
-      // 短い減衰音にする。長く伸ばすと音程として検出されてしまう
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
       osc.type = 'square'
-      osc.frequency.value = accent ? 2000 : 1400
+      // 検出レンジ(MAX_HZ)より上の音にする。こうするとクリックが音程として拾われない
+      osc.frequency.value = accent ? 4699 : 3520
       gain.gain.setValueAtTime(0.0001, t)
-      gain.gain.exponentialRampToValueAtTime(accent ? 0.3 : 0.16, t + 0.001)
+      gain.gain.exponentialRampToValueAtTime(accent ? 0.34 : 0.15, t + 0.001)
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.018)
       osc.connect(gain).connect(ctx.destination)
       osc.start(t)
@@ -621,7 +683,6 @@ function useMetronome(audio, bpm, time, blankRef) {
     const { bpm: b, time: t } = paramRef.current
     const spb = 60 / b
 
-    // 予約（250ms 先読み）
     while (originRef.current + nextBeatRef.current * spb < now + 0.25) {
       const at = originRef.current + nextBeatRef.current * spb
       if (at >= now - 0.05) {
@@ -631,11 +692,9 @@ function useMetronome(audio, bpm, time, blankRef) {
       nextBeatRef.current += 1
     }
 
-    // 表示用の拍
     const b0 = Math.floor((now - originRef.current) / spb)
     setBeat(b0 < 0 ? -1 : ((b0 % t.beats) + t.beats) % t.beats)
 
-    // 古い予約を捨てる
     if (blankRef.current.length > 16) {
       blankRef.current = blankRef.current.filter((ct) => ct > now - 0.5)
     }
@@ -663,7 +722,6 @@ function useMetronome(audio, bpm, time, blankRef) {
     setBeat(-1)
   }, [blankRef])
 
-  /* テンポや拍子を変えたら、今の瞬間を頭にして刻み直す */
   useEffect(() => {
     if (!runningRef.current) return
     const ctx = audio.ctxRef.current
@@ -680,7 +738,7 @@ function useMetronome(audio, bpm, time, blankRef) {
 /* ============================================================
  *  楽譜（OpenSheetMusicDisplay）
  * ============================================================ */
-function useScore(song, time, mode) {
+function useScore(piece, time, mode) {
   const hostRef = useRef(null)
   const innerRef = useRef(null)
   const scrollRef = useRef(null)
@@ -690,7 +748,7 @@ function useScore(song, time, mode) {
   const colorsRef = useRef([])
   const mapRef = useRef([])
   const cursorAtRef = useRef(0)
-  const [status, setStatus] = useState('loading')
+  const [status, setStatus] = useState('empty')
   const [layout, bumpLayout] = useReducer((n) => n + 1, 0)
   const modeRef = useRef(mode)
   modeRef.current = mode
@@ -718,7 +776,6 @@ function useScore(song, time, mode) {
     return true
   }, [])
 
-  /* 曲データの i 番目 → 譜面上の音符（タイで分かれていれば複数） */
   const paint = useCallback(
     (i, color) => {
       const ids = mapRef.current[i] ?? []
@@ -787,6 +844,16 @@ function useScore(song, time, mode) {
     if (!host) return
     let cancelled = false
 
+    if (!piece || !piece.notes?.length) {
+      host.innerHTML = ''
+      osmdRef.current = null
+      notesRef.current = []
+      elemsRef.current = []
+      mapRef.current = []
+      setStatus('empty')
+      return
+    }
+
     setStatus('loading')
     host.innerHTML = ''
     cursorAtRef.current = 0
@@ -806,7 +873,7 @@ function useScore(song, time, mode) {
     })
     osmdRef.current = osmd
 
-    const built = buildScore(song, time)
+    const built = buildScore(piece, time)
     mapRef.current = built.map
 
     osmd
@@ -840,7 +907,7 @@ function useScore(song, time, mode) {
       notesRef.current = []
       elemsRef.current = []
     }
-  }, [song, time, cacheElements])
+  }, [piece, time, cacheElements])
 
   useEffect(() => {
     const osmd = osmdRef.current
@@ -882,10 +949,10 @@ function useScore(song, time, mode) {
 }
 
 /* ============================================================
- *  演奏セッション
+ *  演奏セッション（練習モード）
  * ============================================================ */
 function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) {
-  const [phase, setPhase] = useState('idle') // idle | armed | countin | playing | done
+  const [phase, setPhase] = useState('idle')
   const [index, setIndex] = useState(0)
   const [verdicts, setVerdicts] = useState([])
   const [countBeat, setCountBeat] = useState(0)
@@ -935,7 +1002,7 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
 
       let record
       if (st.samples < MIN_SAMPLES) {
-        record = { verdict: 'missed', cents: null, semis: 0, playedName: null, dev: null }
+        record = { verdict: 'missed', cents: null, semis: 0, playedName: null }
       } else if (hits / st.samples < NAME_HIT_RATIO) {
         const semis = dominant - expect
         const dev = semis * 100 + avgOf(dominant)
@@ -944,7 +1011,6 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
           cents: avgOf(dominant),
           semis,
           playedName: midiToLabel(dominant),
-          dev,
         }
       } else {
         const dev = avgOf(expect)
@@ -953,7 +1019,6 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
           cents: dev,
           semis: 0,
           playedName: midiToLabel(expect),
-          dev,
         }
       }
 
@@ -1000,7 +1065,6 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
     const tl = timelineRef.current
     const now = ctx.currentTime
 
-    /* --- 開始待ち --- */
     if (phaseRef.current === 'armed') {
       const r = pitch.readingRef.current
       const expect = tl.midis[0]
@@ -1008,7 +1072,6 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
         if (!armMatchRef.current) armMatchRef.current = now
         if (now - armMatchRef.current >= 0.1) {
           let origin = armMatchRef.current
-          // メトロノームが動いていれば、いちばん近い拍に吸着させる
           if (metro.runningRef.current) {
             const spb = tl.secPerBeat
             const k = Math.round((origin - metro.originRef.current) / spb)
@@ -1027,7 +1090,6 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
       return
     }
 
-    /* --- カウントイン --- */
     if (phaseRef.current === 'countin') {
       const remain = startAtRef.current + tl.pickupSec - now
       setCountBeat(Math.max(0, Math.ceil(remain / tl.secPerBeat)))
@@ -1042,7 +1104,6 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
 
     if (phaseRef.current !== 'playing') return
 
-    /* --- 演奏中 --- */
     const t = now - startAtRef.current
 
     let i = idxRef.current
@@ -1092,8 +1153,7 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
     armMatchRef.current = 0
 
     if (startMode === 'countin') {
-      const lead = 0.3
-      const countStart = ctx.currentTime + lead
+      const countStart = ctx.currentTime + 0.3
       const downbeat = countStart + time.beats * tl.secPerBeat
       startAtRef.current = downbeat - tl.pickupSec
       if (!metro.runningRef.current) metroOwnedRef.current = true
@@ -1127,13 +1187,229 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
     if (!done.length) return null
     const ok = done.filter((v) => v.verdict === 'ok').length
     const tuned = done.filter((v) => v.verdict !== 'missed' && !v.semis)
-    const avg = tuned.length
-      ? Math.round(tuned.reduce((a, b) => a + b.cents, 0) / tuned.length)
-      : null
+    const avg = tuned.length ? Math.round(tuned.reduce((a, b) => a + b.cents, 0) / tuned.length) : null
     return { ok, total: done.length, avg }
   }, [verdicts])
 
   return { phase, index, verdicts, countBeat, summary, begin, reset, stop: () => stopSession('idle') }
+}
+
+/* ============================================================
+ *  フリー演奏（録音 → 採譜）
+ *
+ *  1. 弾いている間、検出できた音を毎フレーム貯める
+ *  2. 止めたら、同じ音が続いている区間をひとつの音符にまとめる
+ *  3. テンポの格子に合わせて長さを丸め、隙間は休符にする
+ *  生データは残してあるので、テンポや拍子を変えると採譜し直す
+ * ============================================================ */
+function segmentEvents(samples) {
+  const events = []
+  let cur = null
+  let pending = null
+  let lastBlank = -1
+
+  const close = (endAt) => {
+    if (cur && endAt - cur.start >= SEG_MIN_SEC) {
+      events.push({
+        midi: cur.midi,
+        start: cur.start,
+        end: endAt,
+        cents: Math.round(cur.centsSum / cur.n),
+      })
+    }
+    cur = null
+  }
+
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i]
+
+    // クリック音で検出を止めていた区間。印だけ覚えておく
+    if (s.blank) {
+      lastBlank = s.t
+      continue
+    }
+
+    if (cur) {
+      const gap = s.t - cur.last
+      if (gap > SEG_GAP) {
+        // 空白がクリックのせいで、前後が同じ音なら続いていたとみなす
+        const bridged = lastBlank > cur.last && s.midi === cur.midi && gap <= SEG_BRIDGE
+        if (!bridged) {
+          close(cur.last)
+          pending = null
+        }
+      }
+    }
+
+    if (!cur) {
+      cur = { midi: s.midi, start: s.t, last: s.t, n: 1, centsSum: s.cents }
+      pending = null
+      continue
+    }
+    if (s.midi === cur.midi) {
+      cur.last = s.t
+      cur.n += 1
+      cur.centsSum += s.cents
+      pending = null
+      continue
+    }
+    // 違う音。数フレーム続いたら本物とみなす
+    if (!pending || pending.midi !== s.midi) {
+      pending = { midi: s.midi, start: s.t, n: 1, centsSum: s.cents }
+    } else {
+      pending.n += 1
+      pending.centsSum += s.cents
+    }
+    if (pending.n >= SEG_CONFIRM) {
+      close(pending.start)
+      cur = {
+        midi: pending.midi,
+        start: pending.start,
+        last: s.t,
+        n: pending.n,
+        centsSum: pending.centsSum,
+      }
+      pending = null
+    }
+  }
+  if (cur) close(cur.last)
+  return events
+}
+
+function transcribe(events, bpm, time, keyOverride) {
+  if (!events.length) return null
+  const secPerBeat = 60 / bpm
+  const quarterSec = secPerBeat / (4 / time.beatType)
+  const gridSec = quarterSec / 4 // 16分音符の格子
+
+  const t0 = events[0].start
+
+  // 頭と終わりを格子に丸める。頭が重なったら1つずらす
+  const grid = []
+  events.forEach((e) => {
+    let gs = Math.max(0, Math.round((e.start - t0) / gridSec))
+    const prev = grid[grid.length - 1]
+    if (prev && gs <= prev.gs) gs = prev.gs + 1
+    let ge = Math.round((e.end - t0) / gridSec)
+    if (ge <= gs) ge = gs + 1
+    grid.push({ gs, ge, midi: e.midi })
+  })
+
+  /* 音符の長さは「次の音が始まるまで」。
+   * 弓を離した程度の短い隙間で休符を挟むと譜面が読めなくなるため、
+   * はっきり空いたところ（16分2つ分以上）だけ休符にする。 */
+  const notes = []
+  let cursor = 0
+  grid.forEach((g, i) => {
+    if (g.gs > cursor) notes.push({ rest: true, d: (g.gs - cursor) / 4 })
+    const next = grid[i + 1]
+    let end = g.ge
+    if (next) {
+      const gapUnits = next.gs - g.ge
+      if (gapUnits > 0 && gapUnits < REST_MIN_UNITS) end = next.gs
+    } else {
+      // 最後の音は次が無いので、拍の切れ目まで伸ばして丸める
+      const beatUnits = 16 / time.beatType
+      end = Math.max(g.gs + 1, Math.ceil(g.ge / beatUnits) * beatUnits)
+    }
+    notes.push({ n: null, midi: g.midi, d: (end - g.gs) / 4 })
+    cursor = end
+  })
+
+  const fifths = keyOverride ?? guessFifths(grid.map((g) => g.midi))
+  notes.forEach((n) => {
+    if (!n.rest) n.n = midiToLabelIn(n.midi, fifths)
+  })
+
+  return {
+    title: 'フリー演奏',
+    fifths,
+    pickup: 0,
+    notes,
+    noteCount: grid.length,
+    seconds: events[events.length - 1].end - t0,
+  }
+}
+
+function useFreeMode({ audio, pitch, metro, bpm, time, blankRef, keyOverride }) {
+  const [recording, setRecording] = useState(false)
+  const [elapsed, setElapsed] = useState(0)
+  const [events, setEvents] = useState([])
+
+  const samplesRef = useRef([])
+  const rafRef = useRef(null)
+  const t0Ref = useRef(0)
+  const lastAtRef = useRef(-1)
+
+  const loop = useCallback(() => {
+    rafRef.current = requestAnimationFrame(loop)
+    const ctx = audio.ctxRef.current
+    if (!ctx || ctx.state === 'closed') return
+    const now = ctx.currentTime
+    setElapsed(now - t0Ref.current)
+
+    // クリック音のせいで検出を止めていた区間には印を置く
+    const blanked = blankRef.current.some(
+      (ct) => now >= ct - BLANK_BEFORE && now <= ct + BLANK_AFTER
+    )
+    if (blanked) {
+      samplesRef.current.push({ t: now - t0Ref.current, blank: true })
+    } else {
+      const r = pitch.readingRef.current
+      if (r && r.at !== lastAtRef.current && now - r.at < 0.12) {
+        lastAtRef.current = r.at
+        samplesRef.current.push({ t: r.at - t0Ref.current, midi: r.midi, cents: r.cents })
+      }
+    }
+
+    if (now - t0Ref.current > REC_MAX_SEC) stopRef.current()
+  }, [audio.ctxRef, blankRef, pitch.readingRef])
+
+  const stop = useCallback(() => {
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
+    setRecording(false)
+    setEvents(segmentEvents(samplesRef.current))
+  }, [])
+
+  const stopRef = useRef(stop)
+  stopRef.current = stop
+
+  const start = useCallback(async () => {
+    const ctx = await audio.ensure()
+    if (!pitch.running) await pitch.start()
+    samplesRef.current = []
+    lastAtRef.current = -1
+    setEvents([])
+    // メトロノームが動いていれば拍の頭に合わせる
+    let t0 = ctx.currentTime
+    if (metro.runningRef.current) {
+      const spb = 60 / bpm
+      const k = Math.ceil((t0 - metro.originRef.current) / spb)
+      t0 = metro.originRef.current + k * spb
+    }
+    t0Ref.current = t0
+    setElapsed(0)
+    setRecording(true)
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(loop)
+  }, [audio, bpm, loop, metro, pitch])
+
+  const clear = useCallback(() => {
+    samplesRef.current = []
+    setEvents([])
+    setElapsed(0)
+  }, [])
+
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
+
+  /* テンポ・拍子・調号を変えたら採譜し直す（録音はそのまま） */
+  const piece = useMemo(
+    () => transcribe(events, bpm, time, keyOverride),
+    [events, bpm, time, keyOverride]
+  )
+
+  return { recording, elapsed, events, piece, start, stop, clear }
 }
 
 /* ============================================================
@@ -1274,6 +1550,7 @@ export default function App() {
  *  アプリ本体
  * ============================================================ */
 function Studio() {
+  const [tab, setTab] = useState('practice') // practice | free
   const [songId, setSongId] = useState(SONGS[0].id)
   const [a4, setA4] = useState(440)
   const [startMode, setStartMode] = useState('listen')
@@ -1281,9 +1558,9 @@ function Studio() {
 
   const [bpm, setBpm] = useState(song.bpm)
   const [time, setTime] = useState(song.time)
+  const [freeKey, setFreeKey] = useState(null) // null なら自動推定
   const [autoStopped, setAutoStopped] = useState(false)
 
-  /* 曲を変えたらテンポと拍子はその曲のものへ戻す */
   useEffect(() => {
     setBpm(song.bpm)
     setTime(song.time)
@@ -1294,14 +1571,19 @@ function Studio() {
   const audio = useAudio()
   const pitch = usePitch(a4, audio, blankRef)
   const metro = useMetronome(audio, bpm, time, blankRef)
-  const score = useScore(song, time, mode)
+  const free = useFreeMode({ audio, pitch, metro, bpm, time, blankRef, keyOverride: freeKey })
+
+  /* 譜面はタブによって中身が入れ替わる */
+  const piece = tab === 'free' ? free.piece : song
+  const score = useScore(piece, time, mode)
   const session = useSession({ song, bpm, time, startMode, audio, pitch, score, metro })
 
-  /* 画面が裏に回ったら全部止めて、マイクを解放する */
+  /* 画面が裏に回ったら全部止める */
   const teardown = useRef(null)
   teardown.current = () => {
     if (!audio.ctxRef.current && !pitch.running) return
     session.stop()
+    if (free.recording) free.stop()
     metro.stop()
     pitch.stop()
     audio.close()
@@ -1334,13 +1616,22 @@ function Studio() {
 
   const target = song.notes[session.index]?.n ?? '—'
   const playing = session.phase === 'playing'
-  const busy = session.phase !== 'idle' && session.phase !== 'done'
+  const practiceBusy = session.phase !== 'idle' && session.phase !== 'done'
+  const busy = tab === 'practice' ? practiceBusy : free.recording
 
-  /* 外れた音符の上に置く札 */
+  /* タブを切り替えるときは走っているものを止める */
+  const switchTab = (next) => {
+    if (next === tab) return
+    session.stop()
+    if (free.recording) free.stop()
+    setTab(next)
+  }
+
+  /* 外れた音符の上に置く札（練習モードのみ） */
   const [badges, setBadges] = useState([])
   const anchorOf = score.anchorOf
   const layout = score.layout
-  const verdicts = session.verdicts
+  const verdicts = tab === 'practice' ? session.verdicts : []
 
   useLayoutEffect(() => {
     const next = []
@@ -1359,7 +1650,7 @@ function Studio() {
     setBadges((prev) => (sameBadges(prev, next) ? prev : next))
   }, [verdicts, anchorOf, layout, mode])
 
-  const primaryLabel = {
+  const practiceLabel = {
     idle: '演奏を始める',
     armed: `${song.notes[0].n} を待っています`,
     countin: `カウント ${session.countBeat}`,
@@ -1367,10 +1658,38 @@ function Studio() {
     done: 'もう一度',
   }[session.phase]
 
+  const primaryLabel =
+    tab === 'free'
+      ? free.recording
+        ? `停止して採譜（${free.elapsed.toFixed(1)}秒）`
+        : free.piece
+          ? 'もう一度 録音する'
+          : '録音を開始'
+      : practiceLabel
+
   const onPrimary = () => {
     setAutoStopped(false)
-    if (busy) session.stop()
-    else session.begin()
+    if (tab === 'free') {
+      if (free.recording) free.stop()
+      else free.start()
+    } else if (practiceBusy) {
+      session.stop()
+    } else {
+      session.begin()
+    }
+  }
+
+  const micPhase = tab === 'free' ? (free.recording ? 'playing' : 'idle') : session.phase
+
+  const saveXml = () => {
+    if (!free.piece) return
+    const { xml } = buildScore(free.piece, time)
+    const url = URL.createObjectURL(new Blob([xml], { type: 'application/vnd.recordare.musicxml+xml' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `pitch-rec-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.musicxml`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
   const metroApi = {
@@ -1384,19 +1703,38 @@ function Studio() {
   }
 
   return (
-    <div className="app" data-state={tunerState} data-mode={mode}>
+    <div className="app" data-state={tunerState} data-mode={mode} data-tab={tab}>
       <style>{CSS}</style>
 
       <header className="head">
         <h1>
           <span className="clef">𝄞</span> pitch-rec
         </h1>
-        <p className="head-sub">単音・リアルタイム音程チェック</p>
+
+        <div className="tabs" role="tablist">
+          <button
+            role="tab"
+            aria-selected={tab === 'practice'}
+            data-on={tab === 'practice'}
+            onClick={() => switchTab('practice')}
+          >
+            練習
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === 'free'}
+            data-on={tab === 'free'}
+            onClick={() => switchTab('free')}
+          >
+            フリー演奏
+          </button>
+        </div>
+
         <label className="songs-select">
           <select
             value={songId}
             onChange={(e) => setSongId(e.target.value)}
-            disabled={busy}
+            disabled={busy || tab === 'free'}
             aria-label="曲を選ぶ"
           >
             {SONGS.map((s) => (
@@ -1408,37 +1746,39 @@ function Studio() {
         </label>
       </header>
 
-      {/* 上：曲を選ぶ */}
-      <section className="block songs">
-        <h2 className="label">曲を選ぶ</h2>
-        <div className="cards" role="radiogroup" aria-label="デモ曲">
-          {SONGS.map((s) => (
-            <button
-              key={s.id}
-              role="radio"
-              aria-checked={s.id === songId}
-              className="card"
-              data-on={s.id === songId}
-              disabled={busy}
-              onClick={() => setSongId(s.id)}
-            >
-              <span className="card-level">{s.level}</span>
-              <span className="card-title">{s.title}</span>
-              <span className="card-sub">{s.subtitle}</span>
-              <span className="card-meta">
-                {s.keyName} · {sigId(s.time)} · ♩= {s.bpm}
-              </span>
-            </button>
-          ))}
-        </div>
-        <p className="hint">{song.note}</p>
-      </section>
+      {/* 上：曲を選ぶ（練習モードのみ） */}
+      {tab === 'practice' && (
+        <section className="block songs">
+          <h2 className="label">曲を選ぶ</h2>
+          <div className="cards" role="radiogroup" aria-label="デモ曲">
+            {SONGS.map((s) => (
+              <button
+                key={s.id}
+                role="radio"
+                aria-checked={s.id === songId}
+                className="card"
+                data-on={s.id === songId}
+                disabled={busy}
+                onClick={() => setSongId(s.id)}
+              >
+                <span className="card-level">{s.level}</span>
+                <span className="card-title">{s.title}</span>
+                <span className="card-sub">{s.subtitle}</span>
+                <span className="card-meta">
+                  {s.keyName} · {sigId(s.time)} · ♩= {s.bpm}
+                </span>
+              </button>
+            ))}
+          </div>
+          <p className="hint">{song.note}</p>
+        </section>
+      )}
 
       {/* 真ん中：楽譜 */}
       <section className="block score-area">
-        <h2 className="label">楽譜</h2>
+        <h2 className="label">{tab === 'free' ? '採譜した楽譜' : '楽譜'}</h2>
 
-        <div className="score" data-playing={playing} ref={score.scrollRef}>
+        <div className="score" data-playing={playing || free.recording} ref={score.scrollRef}>
           <div className="score-inner" ref={score.innerRef}>
             <div ref={score.hostRef} className="score-host" />
             <div className="marks" aria-hidden="true">
@@ -1456,31 +1796,71 @@ function Studio() {
               ))}
             </div>
           </div>
+
           {score.status === 'loading' && <p className="score-msg">楽譜を組み立てています…</p>}
           {score.status === 'error' && (
             <p className="score-msg error">
               楽譜を表示できませんでした。ページを再読み込みしてください。
             </p>
           )}
+          {score.status === 'empty' && (
+            <p className="score-msg">
+              {free.recording
+                ? '弾いてください。止めると譜面になります。'
+                : '「録音を開始」を押して弾いてみてください。'}
+            </p>
+          )}
         </div>
 
-        <div className="score-controls">
-          <span className="score-count">
-            {score.status === 'ready' ? `${session.index + 1} / ${song.notes.length}` : '…'}
-          </span>
-          <select
-            className="mini grow"
-            value={startMode}
-            onChange={(e) => setStartMode(e.target.value)}
-            disabled={busy}
-            aria-label="開始方法"
-          >
-            <option value="listen">弾き出しで開始</option>
-            <option value="countin">1小節カウント</option>
-          </select>
-        </div>
+        {tab === 'practice' ? (
+          <div className="score-controls">
+            <span className="score-count">
+              {score.status === 'ready' ? `${session.index + 1} / ${song.notes.length}` : '…'}
+            </span>
+            <select
+              className="mini grow"
+              value={startMode}
+              onChange={(e) => setStartMode(e.target.value)}
+              disabled={busy}
+              aria-label="開始方法"
+            >
+              <option value="listen">弾き出しで開始</option>
+              <option value="countin">1小節カウント</option>
+            </select>
+          </div>
+        ) : (
+          <div className="score-controls">
+            <span className="score-count">
+              {free.recording
+                ? `録音中 ${free.elapsed.toFixed(1)}秒`
+                : free.piece
+                  ? `${free.piece.noteCount}音 · ${KEY_NAMES[free.piece.fifths]}`
+                  : '未録音'}
+            </span>
+            <select
+              className="mini"
+              value={freeKey === null ? 'auto' : String(freeKey)}
+              onChange={(e) => setFreeKey(e.target.value === 'auto' ? null : Number(e.target.value))}
+              disabled={free.recording}
+              aria-label="調号"
+            >
+              <option value="auto">調号 自動</option>
+              {Object.keys(KEY_NAMES).map((k) => (
+                <option key={k} value={k}>
+                  {KEY_NAMES[k]}
+                </option>
+              ))}
+            </select>
+            <button className="mini" onClick={free.clear} disabled={free.recording || !free.piece}>
+              消す
+            </button>
+            <button className="mini" onClick={saveXml} disabled={free.recording || !free.piece}>
+              MusicXML
+            </button>
+          </div>
+        )}
 
-        {session.summary && session.phase === 'done' && (
+        {tab === 'practice' && session.summary && session.phase === 'done' && (
           <p className="summary">
             {session.summary.total} 音中 <b>{session.summary.ok}</b> 音が合格
             {session.summary.avg != null && (
@@ -1495,9 +1875,19 @@ function Studio() {
         )}
 
         <p className="hint rotate-hint">
-          緑＝合格、<span className="sw-high">赤＝高い</span>、
-          <span className="sw-low">青＝低い</span>、灰＝鳴っていない。
-          音符の上に外れ幅（▲▼と半音／セント）が付きます。
+          {tab === 'free' ? (
+            <>
+              弾いた音をそのまま譜面に起こします。テンポと拍子を変えると採譜し直すので、
+              リズムが合わないときは値を動かしてみてください。同じ音を続けて弾くと1つの長い音に
+              なります（弓の切り返しまでは見ていません）。
+            </>
+          ) : (
+            <>
+              緑＝合格、<span className="sw-high">赤＝高い</span>、
+              <span className="sw-low">青＝低い</span>、灰＝鳴っていない。
+              音符の上に外れ幅（▲▼と半音／セント）が付きます。
+            </>
+          )}
         </p>
       </section>
 
@@ -1514,7 +1904,7 @@ function Studio() {
         />
         <p className="hint rotate-hint">
           拍子を変えると小節線を引き直します（またぐ音符はタイでつなぎます）。
-          クリック音がマイクに入るのを避けたいときはイヤホンをどうぞ。
+          鳴らしながら録るとリズムが揃います。クリック音を拾わせたくなければイヤホンをどうぞ。
         </p>
       </section>
 
@@ -1529,7 +1919,7 @@ function Studio() {
             <span className="note-oct">{live ? reading.octave : ''}</span>
           </div>
           <div className="freq">
-            {playing || session.phase === 'armed'
+            {tab === 'practice' && (playing || session.phase === 'armed')
               ? `譜面 ${target}${live ? ` ／ ${reading.freq.toFixed(1)} Hz` : ''}`
               : live
                 ? `${reading.freq.toFixed(1)} Hz`
@@ -1551,12 +1941,14 @@ function Studio() {
         )}
 
         <div className="controls">
-          <button className="mic" data-phase={session.phase} onClick={onPrimary}>
+          <button className="mic" data-phase={micPhase} onClick={onPrimary}>
             {primaryLabel}
           </button>
-          <button className="reset" onClick={session.reset} disabled={busy}>
-            戻す
-          </button>
+          {tab === 'practice' && (
+            <button className="reset" onClick={session.reset} disabled={busy}>
+              戻す
+            </button>
+          )}
         </div>
         <label className="a4">
           <span>基準 A</span>
@@ -1622,7 +2014,33 @@ body {
   color: var(--accent);
 }
 .head .clef { font-size: 26px; margin-right: 4px; }
-.head-sub { margin: 4px 0 0; font-size: 12px; color: var(--ink-60); }
+
+/* タブ */
+.tabs {
+  margin-top: 14px;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--paper-2);
+  border-radius: 12px;
+}
+.tabs button {
+  flex: 1;
+  padding: 9px 6px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--ink-60);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.tabs button[data-on="true"] {
+  background: var(--paper);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(16,19,28,.1);
+}
 .songs-select { display: none; }
 
 .label {
@@ -1696,12 +2114,15 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0 28px;
+  text-align: center;
   font-size: 12px;
+  line-height: 1.7;
   color: var(--ink-30);
   background: var(--paper);
   border-radius: 14px;
 }
-.score-msg.error { color: var(--high); padding: 0 24px; text-align: center; }
+.score-msg.error { color: var(--high); }
 
 /* 外れ方の札 */
 .marks { position: absolute; inset: 0; pointer-events: none; }
@@ -1737,16 +2158,19 @@ body {
   border-radius: 10px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  flex: 1;
 }
 .mini {
   font-size: 12px;
-  padding: 7px 8px;
+  padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--paper);
   color: var(--ink);
   cursor: pointer;
+  white-space: nowrap;
 }
+.mini:disabled { color: var(--ink-30); cursor: default; }
 .mini.grow { flex: 1; }
 
 .summary {
@@ -1777,9 +2201,7 @@ body {
   transition: transform .06s ease-out, background .06s, border-color .06s;
 }
 .beat[data-accent="true"] { width: 15px; height: 15px; }
-.beat[data-on="true"] {
-  background: var(--accent); border-color: var(--accent); transform: scale(1.35);
-}
+.beat[data-on="true"] { background: var(--accent); border-color: var(--accent); transform: scale(1.35); }
 .beat[data-accent="true"][data-on="true"] { background: var(--ink); border-color: var(--ink); }
 
 .metro-row { display: flex; gap: 8px; align-items: stretch; }
@@ -1898,7 +2320,6 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
 
 /* ============================================================
  *  横画面（スマホ横持ち）
- *  左：譜面（全高） 右上：チューナー 右下：メトロノーム
  * ============================================================ */
 @media (orientation: landscape) and (max-height: 560px) {
   body { background: var(--paper); }
@@ -1922,11 +2343,12 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
   .head { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 10px; }
   .head h1 { font-size: 15px; }
   .head .clef { font-size: 18px; }
-  .head-sub { display: none; }
+  .tabs { margin-top: 0; padding: 3px; gap: 2px; }
+  .tabs button { padding: 5px 10px; font-size: 11px; }
   .songs-select { display: block; margin-left: auto; }
   .songs-select select {
     font-size: 12px; padding: 5px 8px; border: 1px solid var(--line);
-    border-radius: 8px; background: var(--paper); color: var(--ink); max-width: 42vw;
+    border-radius: 8px; background: var(--paper); color: var(--ink); max-width: 34vw;
   }
 
   .songs, .foot, .rotate-hint, .label { display: none; }
@@ -1940,7 +2362,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
     -webkit-overflow-scrolling: touch; border-radius: 10px; padding: 6px 4px;
   }
   .score-controls { margin-top: 6px; gap: 6px; }
-  .score-controls .mini { padding: 5px 6px; font-size: 11px; }
+  .score-controls .mini { padding: 5px 8px; font-size: 11px; }
   .score-count { font-size: 11px; padding: 0 8px; }
   .summary { margin-top: 6px; padding: 6px 8px; font-size: 11px; }
 

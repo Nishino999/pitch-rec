@@ -12,11 +12,11 @@ import { PitchDetector } from 'pitchy'
 import { OpenSheetMusicDisplay, GraphicalNote } from 'opensheetmusicdisplay'
 
 /* ============================================================
- *  pitch-rec — Step 3.5
- *  追加:
- *   1. 外れた音符の上に「どちらへ・どれだけ」外れたかの札を出す
- *      ▲1半音 / ▼32¢ のように、方向と量をその場で読めるようにする
- *   2. 画面が裏に回ったらマイクを閉じる（録音インジケータも電池も落とす）
+ *  pitch-rec — Step 4
+ *   - 高い＝赤 / 低い＝青 に統一（譜面・音名・チューナーの針すべて）
+ *   - メトロノーム（開始・停止、BPM 1刻み、拍子切替、拍の点灯）
+ *   - 拍子を変えると小節線を引き直す（またぐ音符はタイで分割）
+ *   - クリック音がマイクに回り込む区間は検出を止める
  * ============================================================ */
 
 /* ---------- 音名ユーティリティ ---------- */
@@ -58,7 +58,7 @@ const SONGS = [
     subtitle: 'フランス民謡 / Suzuki Vol.1',
     keyName: 'イ長調',
     fifths: 3,
-    time: [4, 4],
+    time: { beats: 4, beatType: 4 },
     pickup: 0,
     bpm: 88,
     level: '入門',
@@ -76,7 +76,7 @@ const SONGS = [
     subtitle: 'ベートーヴェン 交響曲第9番',
     keyName: 'ニ長調',
     fifths: 2,
-    time: [4, 4],
+    time: { beats: 4, beatType: 4 },
     pickup: 0,
     bpm: 100,
     level: '入門',
@@ -94,7 +94,7 @@ const SONGS = [
     subtitle: 'アメリカ伝統歌',
     keyName: 'ニ長調',
     fifths: 2,
-    time: [3, 4],
+    time: { beats: 3, beatType: 4 },
     pickup: 1,
     bpm: 72,
     level: '初級',
@@ -117,7 +117,7 @@ const SONGS = [
     subtitle: 'ペツォールト（旧 J.S.バッハ作とされた曲）',
     keyName: 'ト長調',
     fifths: 1,
-    time: [3, 4],
+    time: { beats: 3, beatType: 4 },
     pickup: 0,
     bpm: 120,
     level: '初中級',
@@ -131,8 +131,20 @@ const SONGS = [
   },
 ]
 
+const TIME_OPTIONS = [
+  { id: '2/4', beats: 2, beatType: 4 },
+  { id: '3/4', beats: 3, beatType: 4 },
+  { id: '4/4', beats: 4, beatType: 4 },
+  { id: '5/4', beats: 5, beatType: 4 },
+  { id: '6/8', beats: 6, beatType: 8 },
+]
+
+const sigId = (t) => `${t.beats}/${t.beatType}`
+
 /* ============================================================
- *  MusicXML 生成（4分音符 = divisions 4）
+ *  MusicXML 生成
+ *  4分音符 = divisions 4。拍子が変わったら小節線を引き直し、
+ *  小節をまたぐ音符はタイで分割する。
  * ============================================================ */
 const DIVISIONS = 4
 
@@ -148,14 +160,38 @@ const TYPE_TABLE = [
   [0.25, '16th', 0],
 ]
 
+/* 任意の長さを、書ける音符の並びに崩す（2.5 → 2 + 0.5） */
+function decompose(d) {
+  const out = []
+  let rest = d
+  let guard = 0
+  while (rest > 1e-6 && guard++ < 8) {
+    const hit = TYPE_TABLE.find((t) => t[0] <= rest + 1e-6)
+    if (!hit) break
+    out.push(hit[0])
+    rest -= hit[0]
+  }
+  return out.length ? out : [d]
+}
+
 function durationToType(d) {
   const hit = TYPE_TABLE.find((t) => Math.abs(t[0] - d) < 1e-6)
   return hit ? { type: hit[1], dots: hit[2] } : { type: 'quarter', dots: 0 }
 }
 
-function noteXML(nt) {
-  const p = parseNote(nt.n)
-  const { type, dots } = durationToType(nt.d)
+function pieceXML(piece) {
+  const p = parseNote(piece.note.n)
+  const { type, dots } = durationToType(piece.dur)
+  const ties = []
+  const tied = []
+  if (piece.tieStop) {
+    ties.push('        <tie type="stop"/>')
+    tied.push('          <tied type="stop"/>')
+  }
+  if (piece.tieStart) {
+    ties.push('        <tie type="start"/>')
+    tied.push('          <tied type="start"/>')
+  }
   return [
     '      <note>',
     '        <pitch>',
@@ -163,47 +199,73 @@ function noteXML(nt) {
     p.alter ? `          <alter>${p.alter}</alter>` : null,
     `          <octave>${p.octave}</octave>`,
     '        </pitch>',
-    `        <duration>${Math.round(nt.d * DIVISIONS)}</duration>`,
+    `        <duration>${Math.round(piece.dur * DIVISIONS)}</duration>`,
+    ...ties,
     '        <voice>1</voice>',
     `        <type>${type}</type>`,
     ...Array.from({ length: dots }, () => '        <dot/>'),
+    tied.length ? '        <notations>' : null,
+    ...tied,
+    tied.length ? '        </notations>' : null,
     '      </note>',
   ]
     .filter(Boolean)
     .join('\n')
 }
 
-function buildMusicXML(song) {
-  const [beats, beatType] = song.time
-  const barLength = beats * (4 / beatType)
-  const measures = []
-  let current = []
-  let filled = 0
-  let limit = song.pickup > 0 ? song.pickup : barLength
+/* 戻り値の map[i] は「曲データの i 番目の音」が
+ * 譜面上のどの音符（複数になりうる）に対応するかの対応表 */
+function buildScore(song, time) {
+  const barQ = time.beats * (4 / time.beatType)
+  const pickupQ = Math.min(song.pickup, barQ)
 
-  for (const nt of song.notes) {
-    current.push(nt)
-    filled += nt.d
-    if (filled >= limit - 1e-6) {
-      measures.push(current)
-      current = []
-      filled = 0
-      limit = barLength
-    }
+  const measures = []
+  let bar = []
+  let filled = 0
+  let limit = pickupQ > 0 ? pickupQ : barQ
+  const map = []
+  let gIndex = 0
+
+  const closeBar = () => {
+    measures.push(bar)
+    bar = []
+    filled = 0
+    limit = barQ
   }
-  if (current.length) measures.push(current)
+
+  song.notes.forEach((nt, si) => {
+    map[si] = []
+    let remaining = nt.d
+    let first = true
+    let guard = 0
+    while (remaining > 1e-6 && guard++ < 32) {
+      if (limit - filled < 1e-6) closeBar()
+      const take = Math.min(remaining, limit - filled)
+      const restAfter = remaining - take
+      const pieces = decompose(take)
+      pieces.forEach((dur, pi) => {
+        const more = pi < pieces.length - 1 || restAfter > 1e-6
+        bar.push({ note: nt, dur, tieStop: !first, tieStart: more })
+        map[si].push(gIndex++)
+        first = false
+      })
+      filled += take
+      remaining = restAfter
+    }
+  })
+  if (bar.length) closeBar()
 
   const body = measures
-    .map((bar, i) => {
-      const implicit = i === 0 && song.pickup > 0
-      const number = song.pickup > 0 ? i : i + 1
+    .map((pieces, i) => {
+      const implicit = i === 0 && pickupQ > 0
+      const number = pickupQ > 0 ? i : i + 1
       const attrs =
         i === 0
           ? [
               '      <attributes>',
               `        <divisions>${DIVISIONS}</divisions>`,
               `        <key><fifths>${song.fifths}</fifths><mode>major</mode></key>`,
-              `        <time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time>`,
+              `        <time><beats>${time.beats}</beats><beat-type>${time.beatType}</beat-type></time>`,
               '        <clef><sign>G</sign><line>2</line></clef>',
               '      </attributes>',
             ].join('\n')
@@ -211,7 +273,7 @@ function buildMusicXML(song) {
       return [
         `    <measure number="${number}"${implicit ? ' implicit="yes"' : ''}>`,
         attrs,
-        ...bar.map(noteXML),
+        ...pieces.map(pieceXML),
         '    </measure>',
       ]
         .filter(Boolean)
@@ -219,7 +281,7 @@ function buildMusicXML(song) {
     })
     .join('\n')
 
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
 <score-partwise version="4.0">
   <work><work-title>${song.title}</work-title></work>
@@ -230,25 +292,33 @@ function buildMusicXML(song) {
 ${body}
   </part>
 </score-partwise>`
+
+  return { xml, map }
 }
 
-/* ---------- 曲の時間割 ---------- */
-function buildTimeline(song, bpm) {
-  const spb = 60 / bpm
+/* ---------- 曲の時間割 ----------
+ * bpm は「拍子の分母の音符」いくつ分かで数える（6/8 なら8分音符）
+ */
+function buildTimeline(song, bpm, time) {
+  const secPerBeat = 60 / bpm
+  const beatQ = 4 / time.beatType // 1拍が4分音符いくつぶんか
+  const quarterSec = secPerBeat / beatQ
+
   const onsets = []
   let t = 0
   for (const nt of song.notes) {
     onsets.push(t)
-    t += nt.d * spb
+    t += nt.d * quarterSec
   }
   return {
-    spb,
+    secPerBeat,
+    quarterSec,
     onsets,
-    durations: song.notes.map((n) => n.d * spb),
+    durations: song.notes.map((n) => n.d * quarterSec),
     total: t,
     midis: song.notes.map((n) => noteToMidi(n.n)),
-    pickupSec: song.pickup * spb,
-    barSec: song.time[0] * (4 / song.time[1]) * spb,
+    pickupSec: Math.min(song.pickup, time.beats * beatQ) * quarterSec,
+    barSec: time.beats * secPerBeat,
   }
 }
 
@@ -284,14 +354,20 @@ const MIN_SAMPLES = 3
 const NAME_HIT_RATIO = 0.5
 const GOOD_CENTS = 15
 
-const VERDICT = {
-  ok: { color: '#0f8a45', label: '合格' },
-  sharp: { color: '#c9821a', label: '高め' },
-  flat: { color: '#c9821a', label: '低め' },
-  wrong: { color: '#d5342b', label: '違う音' },
-  missed: { color: '#b9bcc6', label: '鳴らず' },
+/* ---------- クリック音の回り込み対策 ----------
+ * スピーカーから出た音がマイクに戻るまでの遅れを見込んで、
+ * クリックの前後は検出そのものを止める
+ */
+const BLANK_BEFORE = 0.015
+const BLANK_AFTER = 0.11
+
+const COLOR = {
+  ok: '#0f8a45',
+  high: '#d5342b', // 高い＝赤
+  low: '#1f5fd0', // 低い＝青
+  missed: '#b9bcc6',
+  ink: '#10131c',
 }
-const COLOR_DEFAULT = '#10131c'
 
 const ZOOM = { portrait: 0.72, landscape: 0.58 }
 
@@ -302,30 +378,17 @@ function median(arr) {
 
 /* ---------- 外れ方の札 ---------- */
 function badgeOf(v) {
-  if (!v) return null
-  if (v.verdict === 'sharp' || v.verdict === 'flat') {
-    const up = v.avgCents > 0
-    return {
-      dir: up ? 'up' : 'down',
-      text: `${Math.abs(v.avgCents)}¢`,
-      color: VERDICT[v.verdict].color,
-      title: `${up ? '高い' : '低い'}（${Math.abs(v.avgCents)}セント）`,
-    }
+  if (!v || v.verdict === 'ok' || v.verdict === 'missed') return null
+  const up = v.verdict === 'high'
+  const semis = Math.abs(v.semis ?? 0)
+  return {
+    dir: up ? 'up' : 'down',
+    text: semis ? `${semis}半音` : `${Math.abs(v.cents ?? 0)}¢`,
+    color: up ? COLOR.high : COLOR.low,
+    title: `${v.playedName ?? '別の音'} を弾いています（${up ? '高い' : '低い'}）`,
   }
-  if (v.verdict === 'wrong') {
-    const up = v.semis > 0
-    const n = Math.abs(v.semis)
-    return {
-      dir: up ? 'up' : 'down',
-      text: n ? `${n}半音` : `${Math.abs(v.avgCents ?? 0)}¢`,
-      color: VERDICT.wrong.color,
-      title: `${v.playedName ?? '別の音'} を弾いています（${up ? '高い' : '低い'}）`,
-    }
-  }
-  return null
 }
 
-/* 札の中身が同じかどうか（再レンダーを止めるために使う） */
 function sameBadges(a, b) {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) {
@@ -365,16 +428,36 @@ function useLayoutMode() {
 }
 
 /* ============================================================
+ *  音声の土台（マイクとメトロノームで同じ時計を使う）
+ * ============================================================ */
+function useAudio() {
+  const ctxRef = useRef(null)
+
+  const ensure = useCallback(async () => {
+    if (!ctxRef.current) {
+      ctxRef.current = new (window.AudioContext || window.webkitAudioContext)()
+    }
+    if (ctxRef.current.state === 'suspended') await ctxRef.current.resume()
+    return ctxRef.current
+  }, [])
+
+  const close = useCallback(() => {
+    ctxRef.current?.close().catch(() => {})
+    ctxRef.current = null
+  }, [])
+
+  return { ctxRef, ensure, close }
+}
+
+/* ============================================================
  *  ピッチ検出
  * ============================================================ */
-function usePitch(a4) {
+function usePitch(a4, audio, blankRef) {
   const [running, setRunning] = useState(false)
   const [error, setError] = useState(null)
   const [reading, setReading] = useState(null)
   const [level, setLevel] = useState(0)
-  const [autoStopped, setAutoStopped] = useState(false)
 
-  const ctxRef = useRef(null)
   const streamRef = useRef(null)
   const rafRef = useRef(null)
   const bufRef = useRef([])
@@ -388,8 +471,6 @@ function usePitch(a4) {
     cancelAnimationFrame(rafRef.current)
     rafRef.current = null
     streamRef.current?.getTracks().forEach((t) => t.stop())
-    ctxRef.current?.close().catch(() => {})
-    ctxRef.current = null
     streamRef.current = null
     bufRef.current = []
     readingRef.current = null
@@ -403,16 +484,12 @@ function usePitch(a4) {
 
   const start = useCallback(async () => {
     setError(null)
-    setAutoStopped(false)
     try {
+      const ctx = await audio.ensure()
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       })
       streamRef.current = stream
-
-      const ctx = new (window.AudioContext || window.webkitAudioContext)()
-      await ctx.resume()
-      ctxRef.current = ctx
 
       const source = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser()
@@ -435,6 +512,15 @@ function usePitch(a4) {
 
       const tick = () => {
         rafRef.current = requestAnimationFrame(tick)
+        if (ctx.state === 'closed') return
+
+        const audioNow = ctx.currentTime
+        // クリック音が回り込んでいる間は何も見ない
+        const blanked = blankRef.current.some(
+          (ct) => audioNow >= ct - BLANK_BEFORE && audioNow <= ct + BLANK_AFTER
+        )
+        if (blanked) return
+
         analyser.getFloatTimeDomainData(input)
 
         let sum = 0
@@ -468,7 +554,7 @@ function usePitch(a4) {
         const { name, octave } = midiToName(midi)
 
         lastOkRef.current = now
-        const next = { freq: f, midi, cents, name, octave, clarity, at: ctx.currentTime }
+        const next = { freq: f, midi, cents, name, octave, clarity, at: audioNow }
         readingRef.current = next
         if (push) {
           lastPushRef.current = now
@@ -484,35 +570,117 @@ function usePitch(a4) {
       )
       setRunning(false)
     }
-  }, [])
-
-  /* 画面が裏に回ったらマイクを閉じる（録音インジケータを消し、電池を使わない） */
-  useEffect(() => {
-    const release = () => {
-      if (!ctxRef.current) return
-      stopRef.current()
-      setAutoStopped(true)
-    }
-    const onVisibility = () => {
-      if (document.visibilityState === 'hidden') release()
-    }
-    document.addEventListener('visibilitychange', onVisibility)
-    window.addEventListener('pagehide', release)
-    return () => {
-      document.removeEventListener('visibilitychange', onVisibility)
-      window.removeEventListener('pagehide', release)
-    }
-  }, [])
+  }, [audio, blankRef])
 
   useEffect(() => () => stopRef.current(), [])
 
-  return { running, error, reading, level, autoStopped, start, stop, ctxRef, readingRef }
+  return { running, error, reading, level, start, stop, readingRef }
+}
+
+/* ============================================================
+ *  メトロノーム
+ *  鳴らす時刻を先に予約する。予約した時刻は blankRef に積んで
+ *  ピッチ検出側に「この間は聴かないで」と伝える。
+ * ============================================================ */
+function useMetronome(audio, bpm, time, blankRef) {
+  const [running, setRunning] = useState(false)
+  const [beat, setBeat] = useState(-1)
+
+  const originRef = useRef(0)
+  const nextBeatRef = useRef(0)
+  const rafRef = useRef(null)
+  const runningRef = useRef(false)
+  const paramRef = useRef({ bpm, time })
+  paramRef.current = { bpm, time }
+
+  const clickAt = useCallback(
+    (t, accent) => {
+      const ctx = audio.ctxRef.current
+      if (!ctx) return
+      // 短い減衰音にする。長く伸ばすと音程として検出されてしまう
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'square'
+      osc.frequency.value = accent ? 2000 : 1400
+      gain.gain.setValueAtTime(0.0001, t)
+      gain.gain.exponentialRampToValueAtTime(accent ? 0.3 : 0.16, t + 0.001)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.018)
+      osc.connect(gain).connect(ctx.destination)
+      osc.start(t)
+      osc.stop(t + 0.03)
+      blankRef.current.push(t)
+    },
+    [audio.ctxRef, blankRef]
+  )
+
+  const loop = useCallback(() => {
+    rafRef.current = requestAnimationFrame(loop)
+    const ctx = audio.ctxRef.current
+    if (!ctx || ctx.state === 'closed') return
+    const now = ctx.currentTime
+    const { bpm: b, time: t } = paramRef.current
+    const spb = 60 / b
+
+    // 予約（250ms 先読み）
+    while (originRef.current + nextBeatRef.current * spb < now + 0.25) {
+      const at = originRef.current + nextBeatRef.current * spb
+      if (at >= now - 0.05) {
+        const pos = ((nextBeatRef.current % t.beats) + t.beats) % t.beats
+        clickAt(at, pos === 0)
+      }
+      nextBeatRef.current += 1
+    }
+
+    // 表示用の拍
+    const b0 = Math.floor((now - originRef.current) / spb)
+    setBeat(b0 < 0 ? -1 : ((b0 % t.beats) + t.beats) % t.beats)
+
+    // 古い予約を捨てる
+    if (blankRef.current.length > 16) {
+      blankRef.current = blankRef.current.filter((ct) => ct > now - 0.5)
+    }
+  }, [audio.ctxRef, blankRef, clickAt])
+
+  const start = useCallback(
+    async (origin, startBeat = 0) => {
+      const ctx = await audio.ensure()
+      originRef.current = origin ?? ctx.currentTime + 0.15
+      nextBeatRef.current = startBeat
+      runningRef.current = true
+      setRunning(true)
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = requestAnimationFrame(loop)
+    },
+    [audio, loop]
+  )
+
+  const stop = useCallback(() => {
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
+    runningRef.current = false
+    blankRef.current = []
+    setRunning(false)
+    setBeat(-1)
+  }, [blankRef])
+
+  /* テンポや拍子を変えたら、今の瞬間を頭にして刻み直す */
+  useEffect(() => {
+    if (!runningRef.current) return
+    const ctx = audio.ctxRef.current
+    if (!ctx) return
+    originRef.current = ctx.currentTime + 0.05
+    nextBeatRef.current = 0
+  }, [bpm, time, audio.ctxRef])
+
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
+
+  return { running, beat, start, stop, runningRef, originRef }
 }
 
 /* ============================================================
  *  楽譜（OpenSheetMusicDisplay）
  * ============================================================ */
-function useScore(song, mode) {
+function useScore(song, time, mode) {
   const hostRef = useRef(null)
   const innerRef = useRef(null)
   const scrollRef = useRef(null)
@@ -520,9 +688,9 @@ function useScore(song, mode) {
   const notesRef = useRef([])
   const elemsRef = useRef([])
   const colorsRef = useRef([])
+  const mapRef = useRef([])
   const cursorAtRef = useRef(0)
   const [status, setStatus] = useState('loading')
-  const [total, setTotal] = useState(0)
   const [layout, bumpLayout] = useReducer((n) => n + 1, 0)
   const modeRef = useRef(mode)
   modeRef.current = mode
@@ -550,33 +718,38 @@ function useScore(song, mode) {
     return true
   }, [])
 
+  /* 曲データの i 番目 → 譜面上の音符（タイで分かれていれば複数） */
   const paint = useCallback(
     (i, color) => {
-      colorsRef.current[i] = color
-      if (paintElement(elemsRef.current[i], color)) return
-      const note = notesRef.current[i]
-      if (note) {
-        note.NoteheadColor = color
-        note.StemColorXml = color
-      }
+      const ids = mapRef.current[i] ?? []
+      ids.forEach((g) => {
+        colorsRef.current[g] = color
+        if (!paintElement(elemsRef.current[g], color)) {
+          const note = notesRef.current[g]
+          if (note) {
+            note.NoteheadColor = color
+            note.StemColorXml = color
+          }
+        }
+      })
     },
     [paintElement]
   )
 
   const repaintAll = useCallback(() => {
-    colorsRef.current.forEach((c, i) => {
-      if (c && c !== COLOR_DEFAULT) paintElement(elemsRef.current[i], c)
+    colorsRef.current.forEach((c, g) => {
+      if (c && c !== COLOR.ink) paintElement(elemsRef.current[g], c)
     })
   }, [paintElement])
 
   const resetColors = useCallback(() => {
-    colorsRef.current = notesRef.current.map(() => COLOR_DEFAULT)
-    elemsRef.current.forEach((el) => paintElement(el, COLOR_DEFAULT))
+    colorsRef.current = notesRef.current.map(() => COLOR.ink)
+    elemsRef.current.forEach((el) => paintElement(el, COLOR.ink))
   }, [paintElement])
 
-  /* 音符の位置（札を置くための座標） */
   const anchorOf = useCallback((i) => {
-    const el = elemsRef.current[i]
+    const g = mapRef.current[i]?.[0]
+    const el = g == null ? null : elemsRef.current[g]
     const inner = innerRef.current
     if (!el || !inner) return null
     const r = el.getBoundingClientRect()
@@ -588,9 +761,10 @@ function useScore(song, mode) {
   const cursorTo = useCallback((i) => {
     const osmd = osmdRef.current
     if (!osmd?.cursor) return
+    const g = mapRef.current[i]?.[0] ?? 0
     try {
       osmd.cursor.reset()
-      for (let k = 0; k < i; k++) osmd.cursor.next()
+      for (let k = 0; k < g; k++) osmd.cursor.next()
       osmd.cursor.show()
       cursorAtRef.current = i
 
@@ -627,21 +801,23 @@ function useScore(song, mode) {
       drawLyricist: false,
       drawPartNames: false,
       drawMeasureNumbers: true,
-      defaultColorMusic: COLOR_DEFAULT,
+      defaultColorMusic: COLOR.ink,
       cursorsOptions: [{ type: 0, color: '#25327a', alpha: 0.2, follow: false }],
     })
     osmdRef.current = osmd
 
+    const built = buildScore(song, time)
+    mapRef.current = built.map
+
     osmd
-      .load(buildMusicXML(song))
+      .load(built.xml)
       .then(() => {
         if (cancelled) return
         osmd.zoom = ZOOM[modeRef.current]
         osmd.render()
         notesRef.current = flattenNotes(osmd)
-        colorsRef.current = notesRef.current.map(() => COLOR_DEFAULT)
+        colorsRef.current = notesRef.current.map(() => COLOR.ink)
         cacheElements()
-        setTotal(notesRef.current.length)
         osmd.cursor.show()
         setStatus('ready')
         bumpLayout()
@@ -664,7 +840,7 @@ function useScore(song, mode) {
       notesRef.current = []
       elemsRef.current = []
     }
-  }, [song, cacheElements])
+  }, [song, time, cacheElements])
 
   useEffect(() => {
     const osmd = osmdRef.current
@@ -702,30 +878,19 @@ function useScore(song, mode) {
     }
   }, [cacheElements, repaintAll, cursorTo])
 
-  return {
-    hostRef,
-    innerRef,
-    scrollRef,
-    status,
-    total,
-    layout,
-    paint,
-    resetColors,
-    cursorTo,
-    anchorOf,
-  }
+  return { hostRef, innerRef, scrollRef, status, layout, paint, resetColors, cursorTo, anchorOf }
 }
 
 /* ============================================================
- *  演奏セッション（同期・判定・クリック音）
+ *  演奏セッション
  * ============================================================ */
-function useSession({ song, bpm, startMode, click, pitch, score }) {
+function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) {
   const [phase, setPhase] = useState('idle') // idle | armed | countin | playing | done
   const [index, setIndex] = useState(0)
   const [verdicts, setVerdicts] = useState([])
   const [countBeat, setCountBeat] = useState(0)
 
-  const timeline = useMemo(() => buildTimeline(song, bpm), [song, bpm])
+  const timeline = useMemo(() => buildTimeline(song, bpm, time), [song, bpm, time])
   const timelineRef = useRef(timeline)
   timelineRef.current = timeline
 
@@ -736,29 +901,12 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
   const statsRef = useRef(null)
   const verdictsRef = useRef([])
   const armMatchRef = useRef(0)
-  const nextClickRef = useRef(0)
+  const metroOwnedRef = useRef(false)
 
   const setPhaseBoth = useCallback((p) => {
     phaseRef.current = p
     setPhase(p)
   }, [])
-
-  const scheduleClick = useCallback(
-    (time, accent) => {
-      const ctx = pitch.ctxRef.current
-      if (!ctx) return
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.frequency.value = accent ? 1600 : 1100
-      gain.gain.setValueAtTime(0.0001, time)
-      gain.gain.exponentialRampToValueAtTime(accent ? 0.25 : 0.14, time + 0.002)
-      gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.05)
-      osc.connect(gain).connect(ctx.destination)
-      osc.start(time)
-      osc.stop(time + 0.07)
-    },
-    [pitch.ctxRef]
-  )
 
   const openNote = useCallback((i) => {
     statsRef.current = { index: i, samples: 0, counts: new Map(), cents: new Map() }
@@ -782,32 +930,36 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
 
       const avgOf = (midi) => {
         const c = st.counts.get(midi) ?? 0
-        return c ? Math.round((st.cents.get(midi) ?? 0) / c) : null
+        return c ? Math.round((st.cents.get(midi) ?? 0) / c) : 0
       }
 
       let record
       if (st.samples < MIN_SAMPLES) {
-        record = { verdict: 'missed', avgCents: null, semis: 0, playedName: null }
+        record = { verdict: 'missed', cents: null, semis: 0, playedName: null, dev: null }
       } else if (hits / st.samples < NAME_HIT_RATIO) {
+        const semis = dominant - expect
+        const dev = semis * 100 + avgOf(dominant)
         record = {
-          verdict: 'wrong',
-          avgCents: avgOf(dominant),
-          semis: dominant - expect,
+          verdict: dev > 0 ? 'high' : 'low',
+          cents: avgOf(dominant),
+          semis,
           playedName: midiToLabel(dominant),
+          dev,
         }
       } else {
-        const avg = avgOf(expect) ?? 0
+        const dev = avgOf(expect)
         record = {
-          verdict: Math.abs(avg) <= GOOD_CENTS ? 'ok' : avg > 0 ? 'sharp' : 'flat',
-          avgCents: avg,
+          verdict: Math.abs(dev) <= GOOD_CENTS ? 'ok' : dev > 0 ? 'high' : 'low',
+          cents: dev,
           semis: 0,
           playedName: midiToLabel(expect),
+          dev,
         }
       }
 
       verdictsRef.current[i] = record
       setVerdicts([...verdictsRef.current])
-      score.paint(i, VERDICT[record.verdict].color)
+      score.paint(i, COLOR[record.verdict])
       statsRef.current = null
     },
     [score]
@@ -818,10 +970,14 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
       cancelAnimationFrame(rafRef.current)
       rafRef.current = null
       statsRef.current = null
+      if (metroOwnedRef.current) {
+        metro.stop()
+        metroOwnedRef.current = false
+      }
       setPhaseBoth(nextPhase)
       setCountBeat(0)
     },
-    [setPhaseBoth]
+    [metro, setPhaseBoth]
   )
 
   const reset = useCallback(() => {
@@ -836,24 +992,30 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
 
   const loop = useCallback(() => {
     rafRef.current = requestAnimationFrame(loop)
-    const ctx = pitch.ctxRef.current
-    if (!ctx) {
-      // マイクが閉じられた（バックグラウンド等）
+    const ctx = audio.ctxRef.current
+    if (!ctx || ctx.state === 'closed') {
       stopSession('idle')
       return
     }
     const tl = timelineRef.current
     const now = ctx.currentTime
 
-    /* --- 開始待ち：最初の音を聴く --- */
+    /* --- 開始待ち --- */
     if (phaseRef.current === 'armed') {
       const r = pitch.readingRef.current
       const expect = tl.midis[0]
       if (r && r.midi === expect && Math.abs(r.cents) < 60) {
         if (!armMatchRef.current) armMatchRef.current = now
         if (now - armMatchRef.current >= 0.1) {
-          startAtRef.current = armMatchRef.current
-          nextClickRef.current = -Math.round(tl.pickupSec / tl.spb)
+          let origin = armMatchRef.current
+          // メトロノームが動いていれば、いちばん近い拍に吸着させる
+          if (metro.runningRef.current) {
+            const spb = tl.secPerBeat
+            const k = Math.round((origin - metro.originRef.current) / spb)
+            const snapped = metro.originRef.current + k * spb
+            if (Math.abs(snapped - origin) < spb * 0.4) origin = snapped
+          }
+          startAtRef.current = origin
           openNote(0)
           idxRef.current = 0
           setIndex(0)
@@ -868,7 +1030,7 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
     /* --- カウントイン --- */
     if (phaseRef.current === 'countin') {
       const remain = startAtRef.current + tl.pickupSec - now
-      setCountBeat(Math.max(0, Math.ceil(remain / tl.spb)))
+      setCountBeat(Math.max(0, Math.ceil(remain / tl.secPerBeat)))
       if (now >= startAtRef.current) {
         openNote(0)
         idxRef.current = 0
@@ -882,18 +1044,6 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
 
     /* --- 演奏中 --- */
     const t = now - startAtRef.current
-
-    if (click) {
-      while (startAtRef.current + tl.pickupSec + nextClickRef.current * tl.spb < now + 0.25) {
-        const beatTime = startAtRef.current + tl.pickupSec + nextClickRef.current * tl.spb
-        if (beatTime >= now - 0.02 && beatTime <= startAtRef.current + tl.total + 0.1) {
-          const beatsPerBar = Math.round(tl.barSec / tl.spb)
-          const pos = ((nextClickRef.current % beatsPerBar) + beatsPerBar) % beatsPerBar
-          scheduleClick(beatTime, pos === 0)
-        }
-        nextClickRef.current += 1
-      }
-    }
 
     let i = idxRef.current
     while (i + 1 < tl.onsets.length && t >= tl.onsets[i + 1]) i += 1
@@ -926,57 +1076,59 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
       finalizeNote(idxRef.current)
       stopSession('done')
     }
-  }, [click, finalizeNote, openNote, pitch.ctxRef, pitch.readingRef, scheduleClick, score, stopSession])
+  }, [audio.ctxRef, finalizeNote, metro, openNote, pitch.readingRef, score, setPhaseBoth, stopSession])
 
   const begin = useCallback(async () => {
-    if (!pitch.ctxRef.current) await pitch.start()
-    requestAnimationFrame(() => {
-      const ctx = pitch.ctxRef.current
-      if (!ctx) return
-      const tl = timelineRef.current
-      verdictsRef.current = []
-      setVerdicts([])
-      score.resetColors()
-      score.cursorTo(0)
-      idxRef.current = 0
-      setIndex(0)
-      armMatchRef.current = 0
+    const ctx = await audio.ensure()
+    if (!pitch.running) await pitch.start()
+    const tl = timelineRef.current
 
-      if (startMode === 'countin') {
-        const beatsPerBar = Math.round(tl.barSec / tl.spb)
-        const lead = 0.3
-        const downbeat = ctx.currentTime + lead + beatsPerBar * tl.spb
-        startAtRef.current = downbeat - tl.pickupSec
-        nextClickRef.current = 0
-        for (let k = 0; k < beatsPerBar; k++) {
-          scheduleClick(downbeat - (beatsPerBar - k) * tl.spb, k === 0)
-        }
-        setPhaseBoth('countin')
-      } else {
-        setPhaseBoth('armed')
-      }
-      cancelAnimationFrame(rafRef.current)
-      rafRef.current = requestAnimationFrame(loop)
-    })
-  }, [loop, pitch, scheduleClick, score, setPhaseBoth, startMode])
+    verdictsRef.current = []
+    setVerdicts([])
+    score.resetColors()
+    score.cursorTo(0)
+    idxRef.current = 0
+    setIndex(0)
+    armMatchRef.current = 0
+
+    if (startMode === 'countin') {
+      const lead = 0.3
+      const countStart = ctx.currentTime + lead
+      const downbeat = countStart + time.beats * tl.secPerBeat
+      startAtRef.current = downbeat - tl.pickupSec
+      if (!metro.runningRef.current) metroOwnedRef.current = true
+      await metro.start(countStart, 0)
+      setPhaseBoth('countin')
+    } else {
+      setPhaseBoth('armed')
+    }
+
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(loop)
+  }, [audio, loop, metro, pitch, score, setPhaseBoth, startMode, time.beats])
 
   useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
 
   useEffect(() => {
-    stopSession('idle')
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
+    statsRef.current = null
+    phaseRef.current = 'idle'
+    setPhase('idle')
+    setCountBeat(0)
     idxRef.current = 0
     setIndex(0)
     verdictsRef.current = []
     setVerdicts([])
-  }, [song, bpm, stopSession])
+  }, [song, bpm, time])
 
   const summary = useMemo(() => {
     const done = verdicts.filter(Boolean)
     if (!done.length) return null
     const ok = done.filter((v) => v.verdict === 'ok').length
-    const tuned = done.filter((v) => v.verdict !== 'missed' && v.avgCents != null && !v.semis)
+    const tuned = done.filter((v) => v.verdict !== 'missed' && !v.semis)
     const avg = tuned.length
-      ? Math.round(tuned.reduce((a, b) => a + b.avgCents, 0) / tuned.length)
+      ? Math.round(tuned.reduce((a, b) => a + b.cents, 0) / tuned.length)
       : null
     return { ok, total: done.length, avg }
   }, [verdicts])
@@ -987,11 +1139,10 @@ function useSession({ song, bpm, startMode, click, pitch, score }) {
 /* ============================================================
  *  UI パーツ
  * ============================================================ */
-function TunerMeter({ cents, active }) {
+function TunerMeter({ cents, state }) {
+  const active = state !== 'idle'
   const clamped = Math.max(-50, Math.min(50, cents ?? 0))
   const pos = 50 + clamped
-  const inTune = active && Math.abs(cents ?? 99) <= IN_TUNE_CENTS
-  const state = !active ? 'idle' : inTune ? 'ok' : 'off'
 
   return (
     <div className="meter" data-state={state}>
@@ -1003,17 +1154,83 @@ function TunerMeter({ cents, active }) {
         <div className="needle" style={{ left: `${pos}%`, opacity: active ? 1 : 0.25 }} />
       </div>
       <div className="meter-labels">
-        <span>♭ 低い</span>
+        <span className="lab-low">低い ▼</span>
         <span className="cents">{active ? `${cents > 0 ? '+' : ''}${cents} cent` : '—'}</span>
-        <span>高い ♯</span>
+        <span className="lab-high">▲ 高い</span>
       </div>
+    </div>
+  )
+}
+
+function Metronome({ bpm, setBpm, time, setTime, metro, disabled }) {
+  const unit = time.beatType === 8 ? '♪' : '♩'
+  return (
+    <div className="metro">
+      <div className="beats" aria-hidden="true">
+        {Array.from({ length: time.beats }, (_, i) => (
+          <span
+            key={i}
+            className="beat"
+            data-on={metro.running && metro.beat === i}
+            data-accent={i === 0}
+          />
+        ))}
+      </div>
+
+      <div className="metro-row">
+        <div className="bpm">
+          <button onClick={() => setBpm((v) => Math.max(30, v - 1))} aria-label="テンポを1下げる">
+            −
+          </button>
+          <span className="bpm-val">
+            {unit}= <b>{bpm}</b>
+          </span>
+          <button onClick={() => setBpm((v) => Math.min(240, v + 1))} aria-label="テンポを1上げる">
+            ＋
+          </button>
+        </div>
+
+        <select
+          className="mini"
+          value={sigId(time)}
+          onChange={(e) => {
+            const t = TIME_OPTIONS.find((o) => o.id === e.target.value)
+            setTime({ beats: t.beats, beatType: t.beatType })
+          }}
+          disabled={disabled}
+          aria-label="拍子"
+        >
+          {TIME_OPTIONS.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.id}
+            </option>
+          ))}
+        </select>
+
+        <button
+          className="metro-btn"
+          data-on={metro.running}
+          onClick={() => (metro.running ? metro.stop() : metro.start())}
+        >
+          {metro.running ? '停止' : '開始'}
+        </button>
+      </div>
+
+      <input
+        className="bpm-slider"
+        type="range"
+        min={30}
+        max={240}
+        value={bpm}
+        onChange={(e) => setBpm(Number(e.target.value))}
+        aria-label="テンポ"
+      />
     </div>
   )
 }
 
 /* ============================================================
  *  エラー境界
- *  何かで落ちても真っ白にせず、原因を画面に出す
  * ============================================================ */
 class Boundary extends Component {
   constructor(props) {
@@ -1060,27 +1277,66 @@ function Studio() {
   const [songId, setSongId] = useState(SONGS[0].id)
   const [a4, setA4] = useState(440)
   const [startMode, setStartMode] = useState('listen')
-  const [click, setClick] = useState(true)
   const song = useMemo(() => SONGS.find((s) => s.id === songId), [songId])
-  const [bpm, setBpm] = useState(song.bpm)
 
-  useEffect(() => setBpm(song.bpm), [song])
+  const [bpm, setBpm] = useState(song.bpm)
+  const [time, setTime] = useState(song.time)
+  const [autoStopped, setAutoStopped] = useState(false)
+
+  /* 曲を変えたらテンポと拍子はその曲のものへ戻す */
+  useEffect(() => {
+    setBpm(song.bpm)
+    setTime(song.time)
+  }, [song])
 
   const mode = useLayoutMode()
-  const pitch = usePitch(a4)
-  const score = useScore(song, mode)
-  const session = useSession({ song, bpm, startMode, click, pitch, score })
+  const blankRef = useRef([])
+  const audio = useAudio()
+  const pitch = usePitch(a4, audio, blankRef)
+  const metro = useMetronome(audio, bpm, time, blankRef)
+  const score = useScore(song, time, mode)
+  const session = useSession({ song, bpm, time, startMode, audio, pitch, score, metro })
 
-  const active = pitch.running && !!pitch.reading
-  const inTune = active && Math.abs(pitch.reading.cents) <= IN_TUNE_CENTS
+  /* 画面が裏に回ったら全部止めて、マイクを解放する */
+  const teardown = useRef(null)
+  teardown.current = () => {
+    if (!audio.ctxRef.current && !pitch.running) return
+    session.stop()
+    metro.stop()
+    pitch.stop()
+    audio.close()
+    blankRef.current = []
+    setAutoStopped(true)
+  }
+
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === 'hidden') teardown.current?.()
+    }
+    const onPageHide = () => teardown.current?.()
+    document.addEventListener('visibilitychange', onHide)
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      document.removeEventListener('visibilitychange', onHide)
+      window.removeEventListener('pagehide', onPageHide)
+    }
+  }, [])
+
+  const reading = pitch.reading
+  const live = pitch.running && !!reading
+  const tunerState = !live
+    ? 'idle'
+    : Math.abs(reading.cents) <= IN_TUNE_CENTS
+      ? 'ok'
+      : reading.cents > 0
+        ? 'high'
+        : 'low'
+
   const target = song.notes[session.index]?.n ?? '—'
   const playing = session.phase === 'playing'
   const busy = session.phase !== 'idle' && session.phase !== 'done'
 
-  /* 外れた音符の上に置く札の位置を計算する
-   * 依存に score オブジェクトそのものを入れると、毎レンダーで新しい参照になり
-   * setBadges → 再レンダー → 依存が変わる…の無限ループになる。
-   * 中身が同じときは前の配列を返して再レンダーを止める。 */
+  /* 外れた音符の上に置く札 */
   const [badges, setBadges] = useState([])
   const anchorOf = score.anchorOf
   const layout = score.layout
@@ -1112,12 +1368,23 @@ function Studio() {
   }[session.phase]
 
   const onPrimary = () => {
+    setAutoStopped(false)
     if (busy) session.stop()
     else session.begin()
   }
 
+  const metroApi = {
+    running: metro.running,
+    beat: metro.beat,
+    start: () => {
+      setAutoStopped(false)
+      metro.start()
+    },
+    stop: metro.stop,
+  }
+
   return (
-    <div className="app" data-state={!active ? 'idle' : inTune ? 'ok' : 'off'} data-mode={mode}>
+    <div className="app" data-state={tunerState} data-mode={mode}>
       <style>{CSS}</style>
 
       <header className="head">
@@ -1134,7 +1401,7 @@ function Studio() {
           >
             {SONGS.map((s) => (
               <option key={s.id} value={s.id}>
-                {s.title}（{s.keyName} {s.time[0]}/{s.time[1]}）
+                {s.title}（{s.keyName} {sigId(s.time)}）
               </option>
             ))}
           </select>
@@ -1159,7 +1426,7 @@ function Studio() {
               <span className="card-title">{s.title}</span>
               <span className="card-sub">{s.subtitle}</span>
               <span className="card-meta">
-                {s.keyName} · {s.time[0]}/{s.time[1]} · ♩= {s.bpm}
+                {s.keyName} · {sigId(s.time)} · ♩= {s.bpm}
               </span>
             </button>
           ))}
@@ -1199,19 +1466,10 @@ function Studio() {
 
         <div className="score-controls">
           <span className="score-count">
-            {score.status === 'ready' ? `${session.index + 1} / ${score.total}` : '…'}
+            {score.status === 'ready' ? `${session.index + 1} / ${song.notes.length}` : '…'}
           </span>
-          <div className="tempo">
-            <button onClick={() => setBpm((v) => Math.max(40, v - 4))} disabled={busy} aria-label="テンポを下げる">
-              −
-            </button>
-            <span>♩= {bpm}</span>
-            <button onClick={() => setBpm((v) => Math.min(160, v + 4))} disabled={busy} aria-label="テンポを上げる">
-              ＋
-            </button>
-          </div>
           <select
-            className="mini"
+            className="mini grow"
             value={startMode}
             onChange={(e) => setStartMode(e.target.value)}
             disabled={busy}
@@ -1220,9 +1478,6 @@ function Studio() {
             <option value="listen">弾き出しで開始</option>
             <option value="countin">1小節カウント</option>
           </select>
-          <button className="mini toggle" data-on={click} onClick={() => setClick((v) => !v)}>
-            クリック
-          </button>
         </div>
 
         {session.summary && session.phase === 'done' && (
@@ -1240,40 +1495,58 @@ function Studio() {
         )}
 
         <p className="hint rotate-hint">
-          緑＝合格、黄＝音程が甘い、赤＝違う音、灰＝鳴っていない。外れた音符には
-          ▲（高い）▼（低い）と外れ幅が付きます。
+          緑＝合格、<span className="sw-high">赤＝高い</span>、
+          <span className="sw-low">青＝低い</span>、灰＝鳴っていない。
+          音符の上に外れ幅（▲▼と半音／セント）が付きます。
         </p>
       </section>
 
-      {/* 下（横画面では右）：マイクと音名 */}
+      {/* 譜面の下（横画面では右下）：メトロノーム */}
+      <section className="block metronome">
+        <h2 className="label">メトロノーム</h2>
+        <Metronome
+          bpm={bpm}
+          setBpm={setBpm}
+          time={time}
+          setTime={setTime}
+          metro={metroApi}
+          disabled={busy}
+        />
+        <p className="hint rotate-hint">
+          拍子を変えると小節線を引き直します（またぐ音符はタイでつなぎます）。
+          クリック音がマイクに入るのを避けたいときはイヤホンをどうぞ。
+        </p>
+      </section>
+
+      {/* 下（横画面では右上）：マイクと音名 */}
       <section className="block readout-block">
         <div className="readout">
           <div className="note">
             <span className="note-name">
-              {active ? pitch.reading.name.replace('#', '') : '—'}
-              {active && pitch.reading.name.includes('#') && <sup>♯</sup>}
+              {live ? reading.name.replace('#', '') : '—'}
+              {live && reading.name.includes('#') && <sup>♯</sup>}
             </span>
-            <span className="note-oct">{active ? pitch.reading.octave : ''}</span>
+            <span className="note-oct">{live ? reading.octave : ''}</span>
           </div>
           <div className="freq">
             {playing || session.phase === 'armed'
-              ? `譜面 ${target}${active ? ` ／ ${pitch.reading.freq.toFixed(1)} Hz` : ''}`
-              : active
-                ? `${pitch.reading.freq.toFixed(1)} Hz`
+              ? `譜面 ${target}${live ? ` ／ ${reading.freq.toFixed(1)} Hz` : ''}`
+              : live
+                ? `${reading.freq.toFixed(1)} Hz`
                 : pitch.running
                   ? '音を待っています'
                   : 'マイクは停止中'}
           </div>
         </div>
 
-        <TunerMeter cents={pitch.reading?.cents ?? 0} active={active} />
+        <TunerMeter cents={reading?.cents ?? 0} state={tunerState} />
 
         <div className="level" aria-hidden="true">
           <div className="level-bar" style={{ width: `${Math.round(pitch.level * 100)}%` }} />
         </div>
 
         {pitch.error && <p className="error">{pitch.error}</p>}
-        {pitch.autoStopped && !pitch.running && (
+        {autoStopped && !pitch.running && (
           <p className="notice">画面を離れたのでマイクを閉じました。もう一度押すと再開します。</p>
         )}
 
@@ -1316,7 +1589,8 @@ const CSS = `
   --line: #e5e5e0;
   --accent: #25327a;
   --ok: #0f8a45;
-  --off: #d5342b;
+  --high: #d5342b;
+  --low: #1f5fd0;
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
@@ -1397,6 +1671,8 @@ body {
 .card-sub { font-size: 11px; color: var(--ink-60); }
 .card-meta { font-size: 11px; color: var(--ink-30); margin-top: 2px; }
 .hint { margin: 10px 2px 0; font-size: 12px; color: var(--ink-60); line-height: 1.6; }
+.sw-high { color: var(--high); font-weight: 700; }
+.sw-low { color: var(--low); font-weight: 700; }
 
 /* 楽譜 */
 .score {
@@ -1425,7 +1701,7 @@ body {
   background: var(--paper);
   border-radius: 14px;
 }
-.score-msg.error { color: var(--off); padding: 0 24px; text-align: center; }
+.score-msg.error { color: var(--high); padding: 0 24px; text-align: center; }
 
 /* 外れ方の札 */
 .marks { position: absolute; inset: 0; pointer-events: none; }
@@ -1450,13 +1726,7 @@ body {
 }
 .mark-arrow { font-size: 8px; }
 
-.score-controls {
-  margin-top: 12px;
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
-  flex-wrap: wrap;
-}
+.score-controls { margin-top: 12px; display: flex; gap: 8px; align-items: stretch; }
 .score-count {
   display: flex;
   align-items: center;
@@ -1468,26 +1738,6 @@ body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.tempo {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0 4px;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.tempo button {
-  border: 0;
-  background: none;
-  color: var(--accent);
-  font-size: 15px;
-  padding: 6px 7px;
-  cursor: pointer;
-}
-.tempo button:disabled { color: var(--ink-30); cursor: default; }
 .mini {
   font-size: 12px;
   padding: 7px 8px;
@@ -1497,7 +1747,7 @@ body {
   color: var(--ink);
   cursor: pointer;
 }
-.toggle[data-on="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.mini.grow { flex: 1; }
 
 .summary {
   margin: 12px 2px 0;
@@ -1509,6 +1759,48 @@ body {
   line-height: 1.6;
 }
 .summary b { color: var(--ok); }
+
+/* メトロノーム */
+.metro {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.beats { display: flex; gap: 8px; align-items: center; justify-content: center; height: 22px; }
+.beat {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  transition: transform .06s ease-out, background .06s, border-color .06s;
+}
+.beat[data-accent="true"] { width: 15px; height: 15px; }
+.beat[data-on="true"] {
+  background: var(--accent); border-color: var(--accent); transform: scale(1.35);
+}
+.beat[data-accent="true"][data-on="true"] { background: var(--ink); border-color: var(--ink); }
+
+.metro-row { display: flex; gap: 8px; align-items: stretch; }
+.bpm {
+  display: flex; align-items: center; gap: 2px;
+  border: 1px solid var(--line); border-radius: 10px; padding: 0 4px;
+  font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.bpm button {
+  border: 0; background: none; color: var(--accent);
+  font-size: 17px; padding: 6px 9px; cursor: pointer;
+}
+.bpm-val b { font-size: 15px; }
+.metro-btn {
+  flex: 1;
+  border: 1px solid var(--accent); border-radius: 10px;
+  background: var(--paper); color: var(--accent);
+  font-size: 13px; font-weight: 600; cursor: pointer; padding: 8px;
+}
+.metro-btn[data-on="true"] { background: var(--accent); color: #fff; }
+.bpm-slider { width: 100%; accent-color: var(--accent); }
 
 /* 音名表示 */
 .readout-block { border-top: 1px solid var(--line); padding-top: 22px; }
@@ -1524,7 +1816,8 @@ body {
   transition: color .12s;
 }
 .app[data-state="ok"] .note { color: var(--ok); }
-.app[data-state="off"] .note { color: var(--off); }
+.app[data-state="high"] .note { color: var(--high); }
+.app[data-state="low"] .note { color: var(--low); }
 .note-name { font-size: 72px; font-weight: 500; }
 .note-name sup { font-size: 30px; }
 .note-oct { font-size: 26px; color: var(--ink-30); }
@@ -1548,11 +1841,14 @@ body {
   transition: left .07s linear, background .12s; border-radius: 1px;
 }
 .meter[data-state="ok"] .needle { background: var(--ok); }
-.meter[data-state="off"] .needle { background: var(--off); }
+.meter[data-state="high"] .needle { background: var(--high); }
+.meter[data-state="low"] .needle { background: var(--low); }
 .meter-labels {
   display: flex; justify-content: space-between; margin-top: 7px;
   font-size: 11px; color: var(--ink-30);
 }
+.lab-low { color: var(--low); }
+.lab-high { color: var(--high); }
 .cents { color: var(--ink-60); font-variant-numeric: tabular-nums; }
 
 .level { margin-top: 16px; height: 3px; background: var(--paper-2); border-radius: 2px; overflow: hidden; }
@@ -1580,19 +1876,16 @@ body {
   font-size: 13px; padding: 6px 8px; border: 1px solid var(--line);
   border-radius: 8px; background: var(--paper); color: var(--ink);
 }
-.error { margin: 14px 0 0; font-size: 12px; color: var(--off); line-height: 1.6; }
+.error { margin: 14px 0 0; font-size: 12px; color: var(--high); line-height: 1.6; }
 .notice { margin: 12px 0 0; font-size: 11px; color: var(--ink-60); line-height: 1.6; }
 .foot { font-size: 11px; color: var(--ink-30); text-align: center; }
 
 /* クラッシュ画面 */
-.crash {
-  max-width: 480px; margin: 0 auto; padding: 40px 20px;
-  background: var(--paper); min-height: 100%;
-}
+.crash { max-width: 480px; margin: 0 auto; padding: 40px 20px; background: var(--paper); min-height: 100%; }
 .crash h2 { font-size: 17px; margin: 0 0 8px; }
 .crash p { font-size: 13px; color: var(--ink-60); margin: 0 0 14px; }
 .crash pre {
-  font-size: 11px; color: var(--off); background: var(--paper-2);
+  font-size: 11px; color: var(--high); background: var(--paper-2);
   padding: 10px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word;
 }
 .crash button {
@@ -1605,6 +1898,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
 
 /* ============================================================
  *  横画面（スマホ横持ち）
+ *  左：譜面（全高） 右上：チューナー 右下：メトロノーム
  * ============================================================ */
 @media (orientation: landscape) and (max-height: 560px) {
   body { background: var(--paper); }
@@ -1618,35 +1912,36 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
       calc(6px + env(safe-area-inset-bottom))
       calc(12px + env(safe-area-inset-left));
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 190px;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) 196px;
+    grid-template-rows: auto minmax(0, 1fr) auto;
     column-gap: 14px;
     row-gap: 6px;
     overflow: hidden;
   }
 
-  .head { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+  .head { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 10px; }
   .head h1 { font-size: 15px; }
   .head .clef { font-size: 18px; }
   .head-sub { display: none; }
   .songs-select { display: block; margin-left: auto; }
   .songs-select select {
     font-size: 12px; padding: 5px 8px; border: 1px solid var(--line);
-    border-radius: 8px; background: var(--paper); color: var(--ink); max-width: 44vw;
+    border-radius: 8px; background: var(--paper); color: var(--ink); max-width: 42vw;
   }
 
   .songs, .foot, .rotate-hint, .label { display: none; }
 
-  .score-area { grid-column: 1; grid-row: 2; min-height: 0; display: flex; flex-direction: column; }
+  .score-area {
+    grid-column: 1; grid-row: 2 / span 2;
+    min-height: 0; display: flex; flex-direction: column;
+  }
   .score {
     flex: 1; min-height: 0; overflow-y: auto;
     -webkit-overflow-scrolling: touch; border-radius: 10px; padding: 6px 4px;
   }
-  .score-controls { margin-top: 6px; gap: 6px; flex-wrap: nowrap; }
+  .score-controls { margin-top: 6px; gap: 6px; }
   .score-controls .mini { padding: 5px 6px; font-size: 11px; }
   .score-count { font-size: 11px; padding: 0 8px; }
-  .tempo { font-size: 11px; }
-  .tempo button { padding: 4px 6px; }
   .summary { margin-top: 6px; padding: 6px 8px; font-size: 11px; }
 
   .readout-block {
@@ -1654,19 +1949,31 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
     border-top: 0; padding-top: 0;
     display: flex; flex-direction: column; justify-content: center;
   }
-  .note-name { font-size: 44px; }
-  .note-name sup { font-size: 19px; }
-  .note-oct { font-size: 17px; }
+  .note-name { font-size: 38px; }
+  .note-name sup { font-size: 17px; }
+  .note-oct { font-size: 15px; }
   .freq { margin-top: 2px; font-size: 10px; }
-  .meter { margin-top: 10px; }
-  .meter-scale { height: 24px; }
-  .meter-labels { font-size: 9px; margin-top: 4px; }
-  .level { margin-top: 8px; }
-  .controls { margin-top: 10px; gap: 6px; }
-  .mic { padding: 11px 6px; font-size: 12px; border-radius: 10px; }
+  .meter { margin-top: 8px; }
+  .meter-scale { height: 22px; }
+  .meter-labels { font-size: 9px; margin-top: 3px; }
+  .level { margin-top: 6px; }
+  .controls { margin-top: 8px; gap: 6px; }
+  .mic { padding: 10px 6px; font-size: 12px; border-radius: 10px; }
   .reset { padding: 0 10px; font-size: 11px; border-radius: 10px; }
-  .a4 { margin-top: 8px; font-size: 10px; }
-  .a4 select { font-size: 11px; padding: 4px 6px; }
-  .error, .notice { margin-top: 8px; font-size: 10px; }
+  .a4 { margin-top: 6px; font-size: 10px; }
+  .a4 select { font-size: 11px; padding: 3px 6px; }
+  .error, .notice { margin-top: 6px; font-size: 10px; }
+
+  .metronome { grid-column: 2; grid-row: 3; }
+  .metro { padding: 8px; gap: 7px; border-radius: 10px; }
+  .beats { height: 14px; gap: 6px; }
+  .beat { width: 9px; height: 9px; }
+  .beat[data-accent="true"] { width: 11px; height: 11px; }
+  .metro-row { gap: 6px; }
+  .bpm { font-size: 11px; }
+  .bpm button { padding: 4px 7px; font-size: 15px; }
+  .bpm-val b { font-size: 13px; }
+  .metro-btn { padding: 6px; font-size: 11px; }
+  .bpm-slider { display: none; }
 }
 `

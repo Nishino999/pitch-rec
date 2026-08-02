@@ -23,6 +23,32 @@ import { OpenSheetMusicDisplay, GraphicalNote } from 'opensheetmusicdisplay'
 const SHARP_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 const FLAT_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B']
 
+/* 固定ド（ドは常に C）の日本語表記。黒鍵は ♯ / ♭ の両方を持つ */
+const JP_NAMES = [
+  { sharp: 'ド', flat: null },
+  { sharp: 'ド♯', flat: 'レ♭' },
+  { sharp: 'レ', flat: null },
+  { sharp: 'レ♯', flat: 'ミ♭' },
+  { sharp: 'ミ', flat: null },
+  { sharp: 'ファ', flat: null },
+  { sharp: 'ファ♯', flat: 'ソ♭' },
+  { sharp: 'ソ', flat: null },
+  { sharp: 'ソ♯', flat: 'ラ♭' },
+  { sharp: 'ラ', flat: null },
+  { sharp: 'ラ♯', flat: 'シ♭' },
+  { sharp: 'シ', flat: null },
+]
+
+/* 1オクターブぶんの鍵盤の並び。x は白鍵の幅を 1 とした位置 */
+const WHITE_PC = [0, 2, 4, 5, 7, 9, 11]
+const BLACK_PC = [
+  { pc: 1, after: 0 },
+  { pc: 3, after: 1 },
+  { pc: 6, after: 3 },
+  { pc: 8, after: 4 },
+  { pc: 10, after: 5 },
+]
+
 function parseNote(name) {
   const m = /^([A-G])(#|b)?(-?\d)$/.exec(name)
   if (!m) return null
@@ -417,7 +443,7 @@ function flattenNotes(osmd) {
 const DETECT = {
   play: { min: 170, max: 3200, clarity: 0.88 }, // 練習・フリー演奏
   violin: { min: 150, max: 1500, clarity: 0.9 }, // 調弦：開放弦まわりだけ見る
-  voice: { min: 80, max: 1200, clarity: 0.8 }, // 発声：低い声まで拾う。声は倍音が多いので緩める
+  voice: { min: 160, max: 1200, clarity: 0.8 }, // 発声：声は倍音が多いのでしきい値を緩める
 }
 
 const RMS_MIN = 0.008
@@ -1557,6 +1583,109 @@ function DialGauge({ cents, active, ok, big, sub, hz }) {
   )
 }
 
+/* 発声モードの鍵盤。1オクターブぶんを大きく描き、鳴っている音の鍵を光らせる */
+function VoiceKeyboard({ reading, active, state }) {
+  const W = 46 // 白鍵の幅
+  const H = 156 // 白鍵の高さ
+  const BW = 30 // 黒鍵の幅
+  const BH = 98
+  const width = W * 7
+
+  const pc = active ? ((reading.midi % 12) + 12) % 12 : -1
+  const octave = active ? reading.octave : null
+  const hit = pc >= 0 ? JP_NAMES[pc] : null
+
+  const keyColor = state === 'ok' ? COLOR.ok : state === 'high' ? COLOR.high : COLOR.low
+
+  return (
+    <div className="kb" data-state={state}>
+      <svg viewBox={`0 0 ${width} ${H + 4}`} className="kb-svg" role="img" aria-label="鍵盤">
+        {/* 白鍵 */}
+        {WHITE_PC.map((p, i) => {
+          const on = p === pc
+          return (
+            <g key={p}>
+              <rect
+                x={i * W + 1}
+                y={1}
+                width={W - 2}
+                height={H}
+                rx="5"
+                className="kb-white"
+                style={on ? { fill: keyColor } : undefined}
+              />
+              <text
+                x={i * W + W / 2}
+                y={H - 16}
+                textAnchor="middle"
+                className="kb-label"
+                style={on ? { fill: '#fff' } : undefined}
+              >
+                {JP_NAMES[p].sharp}
+              </text>
+              {on && octave != null && (
+                <text x={i * W + W / 2} y={H - 40} textAnchor="middle" className="kb-oct-on">
+                  {octave}
+                </text>
+              )}
+            </g>
+          )
+        })}
+
+        {/* 黒鍵 */}
+        {BLACK_PC.map((b) => {
+          const on = b.pc === pc
+          const x = (b.after + 1) * W - BW / 2
+          return (
+            <g key={b.pc}>
+              <rect
+                x={x}
+                y={1}
+                width={BW}
+                height={BH}
+                rx="4"
+                className="kb-black"
+                style={on ? { fill: keyColor } : undefined}
+              />
+              <text x={x + BW / 2} y={BH - 24} textAnchor="middle" className="kb-sharp">
+                {JP_NAMES[b.pc].sharp}
+              </text>
+              <text x={x + BW / 2} y={BH - 10} textAnchor="middle" className="kb-flat">
+                {JP_NAMES[b.pc].flat}
+              </text>
+              {on && octave != null && (
+                <text x={x + BW / 2} y={BH - 38} textAnchor="middle" className="kb-oct-on">
+                  {octave}
+                </text>
+              )}
+            </g>
+          )
+        })}
+      </svg>
+
+      {/* 鳴っている音の名前を大きく */}
+      <div className="kb-now">
+        {active ? (
+          <>
+            <span className="kb-now-name" style={{ color: keyColor }}>
+              {hit.sharp}
+            </span>
+            {hit.flat && (
+              <span className="kb-now-alt">
+                （<span className="sw-high">{hit.sharp}</span> ＝{' '}
+                <span className="sw-low">{hit.flat}</span>）
+              </span>
+            )}
+            <span className="kb-now-oct">{octave}</span>
+          </>
+        ) : (
+          <span className="kb-now-name idle">—</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function Metronome({ bpm, setBpm, time, setTime, metro, disabled }) {
   const unit = time.beatType === 8 ? '♪' : '♩'
   return (
@@ -1646,13 +1775,8 @@ function TuningPanel({ tuneMode, setTuneMode, reading, running, a4 }) {
   const cents = tuneMode === 'violin' ? (near?.cents ?? 0) : (reading?.cents ?? 0)
   const ok = live && Math.abs(cents) <= TUNE_OK_CENTS
 
-  const big = tuneMode === 'violin' ? (live ? near.string.label : '—') : live ? reading.name.replace('#', '') : '—'
-  const sub =
-    tuneMode === 'violin'
-      ? null
-      : live
-        ? `${reading.name.includes('#') ? '♯' : ''}${reading.octave}`
-        : null
+  const big = live && near ? near.string.label : '—'
+  const sub = null
   const hz = live ? `${reading.freq.toFixed(1)} Hz` : null
 
   return (
@@ -1676,41 +1800,94 @@ function TuningPanel({ tuneMode, setTuneMode, reading, running, a4 }) {
         </button>
       </div>
 
-      <DialGauge cents={cents} active={live} ok={ok} big={big} sub={sub} hz={hz} />
-
-      <p className="tune-msg" data-state={!live ? 'idle' : ok ? 'ok' : cents > 0 ? 'high' : 'low'}>
-        {!running
-          ? 'マイクを開始してください'
-          : !live
-            ? '音を鳴らしてください'
-            : ok
-              ? tuneMode === 'violin'
-                ? `${near.string.label}線 合っています`
-                : '合っています'
-              : `${Math.abs(cents)} cent ${cents > 0 ? '高い（緩める）' : '低い（締める）'}`}
-      </p>
-
       {tuneMode === 'violin' ? (
-        <div className="strings">
-          {STRINGS.map((s) => {
-            const on = live && near.string.id === s.id
-            return (
-              <div key={s.id} className="string" data-on={on} data-ok={on && ok}>
-                <span className="string-name">{s.label}</span>
-                <span className="string-sub">
-                  {s.num}・{s.ja}
-                </span>
-                <span className="string-hz">{midiToFreq(s.midi, a4).toFixed(1)} Hz</span>
-                {on && <span className="string-cents">{`${cents > 0 ? '+' : ''}${cents}`}</span>}
-              </div>
-            )
-          })}
-        </div>
+        <>
+          <DialGauge cents={cents} active={live} ok={ok} big={big} sub={sub} hz={hz} />
+
+          <p
+            className="tune-msg"
+            data-state={!live ? 'idle' : ok ? 'ok' : cents > 0 ? 'high' : 'low'}
+          >
+            {!running
+              ? 'マイクを開始してください'
+              : !live
+                ? '音を鳴らしてください'
+                : ok
+                  ? `${near.string.label}線 合っています`
+                  : Math.abs(cents) > 50
+                    ? `${near.string.label}線から大きく外れています（${cents > 0 ? '高い' : '低い'}）`
+                    : `${Math.abs(cents)} cent ${cents > 0 ? '高い（緩める）' : '低い（締める）'}`}
+          </p>
+
+          <div className="strings">
+            {STRINGS.map((s) => {
+              const on = live && near.string.id === s.id
+              return (
+                <div key={s.id} className="string" data-on={on} data-ok={on && ok}>
+                  <span className="string-name">{s.label}</span>
+                  <span className="string-sub">
+                    {s.num}・{s.ja}
+                  </span>
+                  <span className="string-hz">{midiToFreq(s.midi, a4).toFixed(1)} Hz</span>
+                  {on && <span className="string-cents">{`${cents > 0 ? '+' : ''}${cents}`}</span>}
+                </div>
+              )
+            })}
+          </div>
+        </>
       ) : (
-        <div className="voice-range">
-          <span>検出範囲 80〜1200 Hz（およそ E♭2 〜 D6）</span>
-        </div>
+        <>
+          <VoiceKeyboard
+            reading={reading}
+            active={live}
+            state={!live ? 'idle' : ok ? 'ok' : cents > 0 ? 'high' : 'low'}
+          />
+
+          {/* 現在の Hz とセント偏差 */}
+          <div className="voice-read" data-state={!live ? 'idle' : ok ? 'ok' : cents > 0 ? 'high' : 'low'}>
+            {live ? (
+              <>
+                <span className="voice-hz">{reading.freq.toFixed(1)} Hz</span>
+                <span className="voice-sep">/</span>
+                <span className="voice-cents">
+                  {cents > 0 ? '+' : ''}
+                  {cents} cent
+                </span>
+              </>
+            ) : (
+              <span className="voice-hz idle">— Hz / — cent</span>
+            )}
+          </div>
+
+          {/* セント偏差のバー */}
+          <div className="voice-bar" data-state={!live ? 'idle' : ok ? 'ok' : cents > 0 ? 'high' : 'low'}>
+            <span className="vb-zone" />
+            <span className="vb-center" />
+            <span
+              className="vb-needle"
+              style={{ left: `${50 + Math.max(-50, Math.min(50, cents))}%`, opacity: live ? 1 : 0.25 }}
+            />
+          </div>
+
+          <p
+            className="tune-msg"
+            data-state={!live ? 'idle' : ok ? 'ok' : cents > 0 ? 'high' : 'low'}
+          >
+            {!running
+              ? 'マイクを開始してください'
+              : !live
+                ? '音を鳴らしてください'
+                : ok
+                  ? '合っています'
+                  : `${Math.abs(cents)} cent ${cents > 0 ? '高い' : '低い'}`}
+          </p>
+
+          <div className="voice-range">
+            <span>固定ド表記（ドは常に C）・検出範囲 160〜1200 Hz</span>
+          </div>
+        </>
       )}
+
     </div>
   )
 }
@@ -2459,6 +2636,96 @@ body {
 .string[data-ok="true"] .string-cents { background: var(--ok); }
 .voice-range { text-align: center; font-size: 11px; color: var(--ink-30); }
 
+/* 鍵盤 */
+.kb { display: flex; flex-direction: column; gap: 10px; }
+.kb-svg { display: block; width: 100%; height: auto; }
+.kb-white {
+  fill: var(--paper);
+  stroke: #d8d8d2;
+  stroke-width: 1;
+  transition: fill .1s;
+}
+.kb-black { fill: #2a2d38; transition: fill .1s; }
+.kb-label {
+  font-size: 13px;
+  fill: var(--ink-60);
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  font-weight: 600;
+}
+.kb-sharp {
+  font-size: 9px;
+  fill: #ff8b84;
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  font-weight: 700;
+}
+.kb-flat {
+  font-size: 9px;
+  fill: #8fb4f2;
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  font-weight: 700;
+}
+.kb-oct-on {
+  font-size: 11px;
+  fill: #fff;
+  font-weight: 700;
+  opacity: .85;
+}
+
+.kb-now {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+}
+.kb-now-name {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: .02em;
+}
+.kb-now-name.idle { color: var(--ink-30); }
+.kb-now-oct { font-size: 18px; color: var(--ink-30); font-weight: 600; }
+.kb-now-alt { font-size: 11px; color: var(--ink-60); }
+
+/* 現在の Hz とセント */
+.voice-read {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-60);
+  font-variant-numeric: tabular-nums;
+}
+.voice-read[data-state="ok"] .voice-cents { color: var(--ok); font-weight: 700; }
+.voice-read[data-state="high"] .voice-cents { color: var(--high); font-weight: 700; }
+.voice-read[data-state="low"] .voice-cents { color: var(--low); font-weight: 700; }
+.voice-sep { color: var(--ink-30); }
+.voice-hz.idle { color: var(--ink-30); }
+
+.voice-bar {
+  position: relative;
+  height: 22px;
+  border-bottom: 1px solid var(--line);
+}
+.vb-zone {
+  position: absolute; bottom: 0; left: 45%; width: 10%; height: 100%;
+  background: rgba(15,138,69,.1);
+}
+.vb-center {
+  position: absolute; bottom: 0; left: 50%; width: 1px; height: 100%;
+  background: var(--line); transform: translateX(-50%);
+}
+.vb-needle {
+  position: absolute; bottom: 0; width: 2px; height: 100%; border-radius: 1px;
+  background: var(--ink-30); transform: translateX(-50%);
+  transition: left .07s linear, background .12s;
+}
+.voice-bar[data-state="ok"] .vb-needle { background: var(--ok); }
+.voice-bar[data-state="high"] .vb-needle { background: var(--high); }
+.voice-bar[data-state="low"] .vb-needle { background: var(--low); }
+
 /* 楽譜 */
 .score {
   position: relative;
@@ -2755,6 +3022,14 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
   .string-name { font-size: 16px; }
   .string-sub, .string-hz { font-size: 8.5px; }
   .voice-range { font-size: 9px; }
+  .kb { gap: 5px; flex: 1; min-height: 0; }
+  .kb-svg { flex: 1; min-height: 0; max-height: 100%; width: auto; margin: 0 auto; }
+  .kb-now { min-height: 26px; }
+  .kb-now-name { font-size: 22px; }
+  .kb-now-oct { font-size: 13px; }
+  .kb-now-alt { font-size: 9px; }
+  .voice-read { font-size: 10px; }
+  .voice-bar { height: 16px; }
 
   .readout-block {
     grid-column: 2; grid-row: 2; min-height: 0;

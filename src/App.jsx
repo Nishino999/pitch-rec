@@ -519,6 +519,131 @@ function sameBadges(a, b) {
 }
 
 /* ============================================================
+ *  横並びリストをマウスでも動かせるようにする
+ *  - 掴んで左右にドラッグ
+ *  - ホイールの縦回転を横スクロールに変換
+ *  - 端に着いたかどうかを返す（左右ボタンの出し分けに使う）
+ *  タッチはブラウザ本来のスクロールに任せるので何もしない
+ * ============================================================ */
+function useDragScroll() {
+  const ref = useRef(null)
+  const [edges, setEdges] = useState({ start: true, end: true })
+
+  const readEdges = useCallback(() => {
+    const el = ref.current
+    if (!el) return
+    const max = el.scrollWidth - el.clientWidth
+    setEdges({ start: el.scrollLeft <= 1, end: el.scrollLeft >= max - 1 })
+  }, [])
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+
+    let dragging = false
+    let moved = false
+    let startX = 0
+    let startLeft = 0
+
+    const onPointerDown = (e) => {
+      if (e.pointerType === 'touch' || e.button !== 0) return
+      dragging = true
+      moved = false
+      startX = e.clientX
+      startLeft = el.scrollLeft
+    }
+
+    const onPointerMove = (e) => {
+      if (!dragging) return
+      const dx = e.clientX - startX
+      if (!moved && Math.abs(dx) > 4) {
+        moved = true
+        el.dataset.dragging = 'on'
+        try {
+          el.setPointerCapture(e.pointerId)
+        } catch {
+          /* 取れなくても動作に支障はない */
+        }
+      }
+      if (moved) {
+        e.preventDefault()
+        el.scrollLeft = startLeft - dx
+      }
+    }
+
+    const endDrag = (e) => {
+      if (!dragging) return
+      dragging = false
+      delete el.dataset.dragging
+      try {
+        el.releasePointerCapture?.(e.pointerId)
+      } catch {
+        /* すでに解放済みなら何もしない */
+      }
+      if (moved) {
+        // ドラッグ直後のクリックでカードが選ばれてしまうのを防ぐ
+        const swallow = (ev) => {
+          ev.stopPropagation()
+          ev.preventDefault()
+        }
+        el.addEventListener('click', swallow, { capture: true, once: true })
+        setTimeout(() => el.removeEventListener('click', swallow, true), 120)
+      }
+    }
+
+    const onWheel = (e) => {
+      const dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+      if (!dx) return
+      const max = el.scrollWidth - el.clientWidth
+      if (max <= 0) return
+      // 端まで来たらページ側のスクロールに譲る
+      if ((dx < 0 && el.scrollLeft <= 0) || (dx > 0 && el.scrollLeft >= max)) return
+      e.preventDefault()
+      el.scrollLeft = Math.max(0, Math.min(max, el.scrollLeft + dx))
+    }
+
+    el.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', endDrag)
+    window.addEventListener('pointercancel', endDrag)
+    el.addEventListener('wheel', onWheel, { passive: false })
+    el.addEventListener('scroll', readEdges, { passive: true })
+    window.addEventListener('resize', readEdges)
+    readEdges()
+
+    return () => {
+      el.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', endDrag)
+      window.removeEventListener('pointercancel', endDrag)
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('scroll', readEdges)
+      window.removeEventListener('resize', readEdges)
+    }
+  }, [readEdges])
+
+  const nudge = useCallback((dir) => {
+    const el = ref.current
+    if (!el) return
+    el.scrollBy({ left: dir * el.clientWidth * 0.75, behavior: 'smooth' })
+  }, [])
+
+  /* 選んだカードが隠れていたら見える位置まで寄せる */
+  const revealChild = useCallback((index) => {
+    const el = ref.current
+    const child = el?.children?.[index]
+    if (!el || !child) return
+    const left = child.offsetLeft
+    const right = left + child.offsetWidth
+    if (left < el.scrollLeft || right > el.scrollLeft + el.clientWidth) {
+      el.scrollTo({ left: left - 12, behavior: 'smooth' })
+    }
+  }, [])
+
+  return { ref, edges, nudge, revealChild }
+}
+
+/* ============================================================
  *  画面の向き
  * ============================================================ */
 const LANDSCAPE_QUERY = '(orientation: landscape) and (max-height: 560px)'
@@ -1949,10 +2074,20 @@ function Studio() {
   const [freeKey, setFreeKey] = useState(null)
   const [autoStopped, setAutoStopped] = useState(false)
 
+  const cards = useDragScroll()
+
   useEffect(() => {
     setBpm(song.bpm)
     setTime(song.time)
   }, [song])
+
+  /* 曲が変わったら、そのカードが見える位置まで寄せる */
+  const revealChild = cards.revealChild
+  useEffect(() => {
+    if (tab !== 'practice') return
+    const i = SONGS.findIndex((s) => s.id === songId)
+    if (i >= 0) revealChild(i)
+  }, [songId, tab, revealChild])
 
   const mode = useLayoutMode()
   const blankRef = useRef([])
@@ -2168,25 +2303,47 @@ function Studio() {
       {tab === 'practice' && (
         <section className="block songs">
           <h2 className="label">曲を選ぶ</h2>
-          <div className="cards" role="radiogroup" aria-label="デモ曲">
-            {SONGS.map((s) => (
-              <button
-                key={s.id}
-                role="radio"
-                aria-checked={s.id === songId}
-                className="card"
-                data-on={s.id === songId}
-                disabled={busy}
-                onClick={() => setSongId(s.id)}
-              >
-                <span className="card-level">{s.level}</span>
-                <span className="card-title">{s.title}</span>
-                <span className="card-sub">{s.subtitle}</span>
-                <span className="card-meta">
-                  {s.keyName} · {sigId(s.time)} · ♩= {s.bpm}
-                </span>
-              </button>
-            ))}
+          <div className="cards-wrap">
+            <button
+              className="cards-nav"
+              data-side="prev"
+              onClick={() => cards.nudge(-1)}
+              disabled={cards.edges.start}
+              aria-label="前の曲へスクロール"
+            >
+              ‹
+            </button>
+
+            <div className="cards" role="radiogroup" aria-label="デモ曲" ref={cards.ref}>
+              {SONGS.map((s) => (
+                <button
+                  key={s.id}
+                  role="radio"
+                  aria-checked={s.id === songId}
+                  className="card"
+                  data-on={s.id === songId}
+                  disabled={busy}
+                  onClick={() => setSongId(s.id)}
+                >
+                  <span className="card-level">{s.level}</span>
+                  <span className="card-title">{s.title}</span>
+                  <span className="card-sub">{s.subtitle}</span>
+                  <span className="card-meta">
+                    {s.keyName} · {sigId(s.time)} · ♩= {s.bpm}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <button
+              className="cards-nav"
+              data-side="next"
+              onClick={() => cards.nudge(1)}
+              disabled={cards.edges.end}
+              aria-label="次の曲へスクロール"
+            >
+              ›
+            </button>
           </div>
           <p className="hint">{song.note}</p>
         </section>
@@ -2494,6 +2651,7 @@ body {
 }
 
 /* 曲カード */
+.cards-wrap { position: relative; }
 .cards {
   display: flex;
   gap: 10px;
@@ -2501,8 +2659,46 @@ body {
   padding-bottom: 4px;
   scroll-snap-type: x mandatory;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
 .cards::-webkit-scrollbar { display: none; }
+/* ドラッグ中はスナップを切る（引っかかって動かなくなるため） */
+.cards[data-dragging="on"] {
+  scroll-snap-type: none;
+  scroll-behavior: auto;
+}
+
+/* 左右の送りボタン。マウスのある環境にだけ出す */
+.cards-nav { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .cards { cursor: grab; }
+  .cards[data-dragging="on"] { cursor: grabbing; }
+  .cards[data-dragging="on"] .card { cursor: grabbing; }
+  .cards-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 2;
+    width: 30px;
+    height: 30px;
+    padding: 0 0 3px;
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    background: var(--paper);
+    color: var(--accent);
+    font-size: 19px;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 1px 6px rgba(16,19,28,.14);
+    transition: opacity .15s;
+  }
+  .cards-nav[data-side="prev"] { left: -10px; }
+  .cards-nav[data-side="next"] { right: -10px; }
+  .cards-nav:disabled { opacity: 0; pointer-events: none; }
+}
 .card {
   flex: 0 0 62%;
   scroll-snap-align: start;

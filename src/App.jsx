@@ -942,24 +942,48 @@ function useMetronome(audio, bpm, time, blankRef) {
 
 /* ============================================================
  *  バイオリンらしい音を鳴らす
- *  のこぎり波を2本わずかにずらして重ね、低域通過フィルタで角を落とす。
- *  押している間だけ鳴らし、離したら短く減衰させる（弓を引く感じ）。
+ *
+ *  弓で擦った弦はほぼのこぎり波（ヘルムホルツ運動）なので、そこを土台にして
+ *  本物と電子音を分けている要素を足していく。
+ *   ・弓が弦を掴むまでの立ち上がり（90ms かけて開く）と、擦れ音のノイズ
+ *   ・少し遅れて効いてくるビブラート
+ *   ・胴の共鳴（バンドパスを並列にして箱鳴りを作る）
+ *   ・鳴り始めに音が明るくなる（フィルタを開く）
  * ============================================================ */
+const BODY_RESONANCE = [
+  [275, 3.0, 0.5], // 空気の共鳴
+  [460, 4.0, 0.34], // 表板
+  [720, 5.0, 0.2],
+  [2600, 1.6, 0.26], // ブリッジ・ヒル（明るさのもと）
+]
+
 function useViolinSynth(audio) {
   const voiceRef = useRef(null)
+  const noiseRef = useRef({ ctx: null, buffer: null })
+
+  const noiseBuffer = useCallback((ctx) => {
+    if (noiseRef.current.ctx === ctx && noiseRef.current.buffer) return noiseRef.current.buffer
+    const len = Math.floor(ctx.sampleRate * 0.5)
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate)
+    const data = buf.getChannelData(0)
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1
+    noiseRef.current = { ctx, buffer: buf }
+    return buf
+  }, [])
 
   const release = useCallback(() => {
     const v = voiceRef.current
     if (!v) return
     voiceRef.current = null
-    const { ctx, gain, oscs } = v
+    const { ctx, env, nodes } = v
     if (ctx.state === 'closed') return
     const now = ctx.currentTime
     try {
-      gain.gain.cancelScheduledValues(now)
-      gain.gain.setValueAtTime(Math.max(gain.gain.value, 0.0001), now)
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18)
-      oscs.forEach((o) => o.stop(now + 0.22))
+      env.gain.cancelScheduledValues(now)
+      env.gain.setValueAtTime(Math.max(env.gain.value, 0.0001), now)
+      // 弓を離すと音は素早く、でも切り落とさずに消える
+      env.gain.exponentialRampToValueAtTime(0.0001, now + 0.22)
+      nodes.forEach((n) => n.stop(now + 0.3))
     } catch {
       /* すでに止まっていれば何もしない */
     }
@@ -971,49 +995,180 @@ function useViolinSynth(audio) {
       release()
       const now = ctx.currentTime
 
-      const gain = ctx.createGain()
-      const filter = ctx.createBiquadFilter()
-      filter.type = 'lowpass'
-      filter.frequency.value = Math.min(7000, freq * 7)
-      filter.Q.value = 0.7
+      const src = ctx.createGain()
+      src.gain.value = 0.33
+      const env = ctx.createGain()
+      const out = ctx.createGain()
+      out.gain.value = 0.45
 
-      const o1 = ctx.createOscillator()
-      o1.type = 'sawtooth'
-      o1.frequency.value = freq
+      /* 弦：わずかにずらしたのこぎり波を3本 */
+      const oscs = [0, -7, 8].map((cents) => {
+        const o = ctx.createOscillator()
+        o.type = 'sawtooth'
+        o.frequency.value = freq
+        o.detune.value = cents
+        o.connect(src)
+        return o
+      })
 
-      const o2 = ctx.createOscillator()
-      o2.type = 'sawtooth'
-      o2.frequency.value = freq
-      o2.detune.value = 7 // わずかにずらすと厚みが出る
-      const g2 = ctx.createGain()
-      g2.gain.value = 0.6
+      /* ビブラート。弾き始めからではなく、少し遅れて掛かる */
+      const lfo = ctx.createOscillator()
+      lfo.type = 'sine'
+      lfo.frequency.value = 5.4
+      const lfoDepth = ctx.createGain()
+      lfoDepth.gain.setValueAtTime(0, now)
+      lfoDepth.gain.setValueAtTime(0, now + 0.25)
+      lfoDepth.gain.linearRampToValueAtTime(13, now + 0.9) // セント
+      lfo.connect(lfoDepth)
+      oscs.forEach((o) => lfoDepth.connect(o.detune))
 
-      const o3 = ctx.createOscillator()
-      o3.type = 'triangle'
-      o3.frequency.value = freq * 2
-      const g3 = ctx.createGain()
-      g3.gain.value = 0.12
+      /* 弓の擦れ音。最初だけ強く、すぐ落ち着く */
+      const noise = ctx.createBufferSource()
+      noise.buffer = noiseBuffer(ctx)
+      noise.loop = true
+      const nbp = ctx.createBiquadFilter()
+      nbp.type = 'bandpass'
+      nbp.frequency.value = Math.min(5200, freq * 4)
+      nbp.Q.value = 0.9
+      const nGain = ctx.createGain()
+      nGain.gain.setValueAtTime(0.0001, now)
+      nGain.gain.exponentialRampToValueAtTime(0.05, now + 0.03)
+      nGain.gain.exponentialRampToValueAtTime(0.006, now + 0.3)
+      noise.connect(nbp).connect(nGain).connect(src)
 
-      gain.gain.setValueAtTime(0.0001, now)
-      gain.gain.exponentialRampToValueAtTime(0.2, now + 0.05)
+      src.connect(env)
 
-      o1.connect(gain)
-      o2.connect(g2).connect(gain)
-      o3.connect(g3).connect(gain)
-      gain.connect(filter).connect(ctx.destination)
+      /* 胴の共鳴：素の音に並列のバンドパスを混ぜる */
+      const dry = ctx.createGain()
+      dry.gain.value = 0.55
+      env.connect(dry).connect(out)
+      BODY_RESONANCE.forEach(([f, q, g]) => {
+        const bp = ctx.createBiquadFilter()
+        bp.type = 'bandpass'
+        bp.frequency.value = f
+        bp.Q.value = q
+        const bg = ctx.createGain()
+        bg.gain.value = g
+        env.connect(bp).connect(bg).connect(out)
+      })
 
-      o1.start(now)
-      o2.start(now)
-      o3.start(now)
+      /* 鳴り始めに明るくなる */
+      const lp = ctx.createBiquadFilter()
+      lp.type = 'lowpass'
+      lp.Q.value = 0.5
+      lp.frequency.setValueAtTime(Math.min(2600, freq * 3), now)
+      lp.frequency.linearRampToValueAtTime(Math.min(9000, freq * 9), now + 0.2)
+      out.connect(lp).connect(ctx.destination)
 
-      voiceRef.current = { ctx, gain, oscs: [o1, o2, o3] }
+      /* 弓が弦を掴むまでの間。ここを速くすると途端に電子音になる */
+      env.gain.setValueAtTime(0.0001, now)
+      env.gain.exponentialRampToValueAtTime(0.3, now + 0.09)
+      env.gain.exponentialRampToValueAtTime(0.24, now + 0.45)
+
+      const nodes = [...oscs, lfo, noise]
+      nodes.forEach((n) => n.start(now))
+
+      voiceRef.current = { ctx, env, nodes }
     },
-    [audio, release]
+    [audio, noiseBuffer, release]
   )
 
   useEffect(() => () => release(), [release])
 
   return { play, release }
+}
+
+/* ============================================================
+ *  没入モード
+ *  iPhone の Safari は Fullscreen API に対応していないので、
+ *  CSS で画面いっぱいに広げるのが本体。使える環境ではそれに加えて
+ *  ブラウザの枠も畳み、画面が消灯しないようにする。
+ * ============================================================ */
+function useImmersive() {
+  const [on, setOn] = useState(false)
+  const wakeRef = useRef(null)
+
+  const requestWakeLock = useCallback(async () => {
+    try {
+      if (navigator.wakeLock && !wakeRef.current) {
+        wakeRef.current = await navigator.wakeLock.request('screen')
+        wakeRef.current.addEventListener?.('release', () => {
+          wakeRef.current = null
+        })
+      }
+    } catch {
+      /* 対応していない、または拒否された。表示自体には影響しない */
+    }
+  }, [])
+
+  const enter = useCallback(async () => {
+    setOn(true)
+    const el = document.documentElement
+    try {
+      if (el.requestFullscreen) await el.requestFullscreen({ navigationUI: 'hide' })
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen()
+    } catch {
+      /* 使えない環境では CSS だけで広げる */
+    }
+    requestWakeLock()
+  }, [requestWakeLock])
+
+  const exit = useCallback(() => {
+    setOn(false)
+    try {
+      if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen()
+      else if (document.webkitFullscreenElement && document.webkitExitFullscreen)
+        document.webkitExitFullscreen()
+    } catch {
+      /* 無視してよい */
+    }
+    wakeRef.current?.release?.().catch(() => {})
+    wakeRef.current = null
+  }, [])
+
+  /* ブラウザ側で全画面を抜けたとき（Esc やジェスチャ）に合わせる */
+  useEffect(() => {
+    const sync = () => {
+      const fs = document.fullscreenElement || document.webkitFullscreenElement
+      if (!fs && document.fullscreenEnabled) setOn(false)
+    }
+    document.addEventListener('fullscreenchange', sync)
+    document.addEventListener('webkitfullscreenchange', sync)
+    return () => {
+      document.removeEventListener('fullscreenchange', sync)
+      document.removeEventListener('webkitfullscreenchange', sync)
+    }
+  }, [])
+
+  /* Esc で抜ける（Fullscreen API を使えない環境向け） */
+  useEffect(() => {
+    if (!on) return
+    const onKey = (e) => {
+      if (e.key === 'Escape') exit()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [on, exit])
+
+  /* 画面を離れて戻ったら、消灯防止を取り直す */
+  useEffect(() => {
+    if (!on) return
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') requestWakeLock()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [on, requestWakeLock])
+
+  useEffect(
+    () => () => {
+      wakeRef.current?.release?.().catch(() => {})
+      wakeRef.current = null
+    },
+    []
+  )
+
+  return { on, enter, exit }
 }
 
 /* ============================================================
@@ -1910,7 +2065,7 @@ function VoiceKeyboard({ reading, active, state }) {
 }
 
 /* 指板。写真と同じ並びで、上から E → A → D → G */
-function Fingerboard({ a4, sound, setSound, onPress, onRelease, current }) {
+function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, immersive }) {
   const COL = 74
   const ROW = 46
   const TOP = 30
@@ -2015,9 +2170,16 @@ function Fingerboard({ a4, sound, setSound, onPress, onRelease, current }) {
             </span>
           ))}
         </span>
-        <button className="mini toggle" data-on={sound} onClick={() => setSound((v) => !v)}>
-          {sound ? '音あり' : '音なし'}
-        </button>
+        <span className="fb-actions">
+          <button className="mini toggle" data-on={sound} onClick={() => setSound((v) => !v)}>
+            {sound ? '音あり' : '音なし'}
+          </button>
+          {!immersive.on && (
+            <button className="mini" onClick={immersive.enter}>
+              全画面
+            </button>
+          )}
+        </span>
       </div>
     </div>
   )
@@ -2352,6 +2514,7 @@ function Studio() {
   const metro = useMetronome(audio, bpm, time, blankRef)
   const free = useFreeMode({ audio, pitch, metro, bpm, time, blankRef, keyOverride: freeKey })
   const synth = useViolinSynth(audio)
+  const immersive = useImmersive()
 
   const piece = tab === 'free' ? free.piece : song
   const score = useScore(tab === 'tuning' ? null : piece, time, mode)
@@ -2403,6 +2566,7 @@ function Studio() {
     if (free.recording) free.stop()
     synth.release()
     setFinger(null)
+    if (immersive.on) immersive.exit()
     // 運指ではマイクを使わないので閉じておく
     if (next === 'finger' && pitch.running) pitch.stop()
     setTab(next)
@@ -2515,7 +2679,7 @@ function Studio() {
   }
 
   return (
-    <div className="app" data-state={tunerState} data-mode={mode} data-tab={tab}>
+    <div className="app" data-state={tunerState} data-mode={mode} data-tab={tab} data-immersive={immersive.on}>
       <style>{CSS}</style>
 
       <header className="head">
@@ -2642,6 +2806,13 @@ function Studio() {
       {tab === 'finger' && (
         <section className="block finger-area">
           <h2 className="label">運指（第1ポジション）</h2>
+
+          {immersive.on && (
+            <button className="exit-full" onClick={immersive.exit} aria-label="全画面をやめる">
+              ✕
+            </button>
+          )}
+
           <FingerReadout current={finger} a4={a4} />
           <Fingerboard
             a4={a4}
@@ -2650,7 +2821,13 @@ function Studio() {
             onPress={pressFret}
             onRelease={releaseFret}
             current={finger}
+            immersive={immersive}
           />
+
+          {immersive.on && mode === 'portrait' && (
+            <p className="turn-hint">横向きにすると指板が大きくなります</p>
+          )}
+
           <p className="hint rotate-hint">
             押している間だけ音が鳴ります。いちばん左の列は開放弦なので、指では押さえずに弾く音です。
             白＝そのままの音、<span className="sw-high">桃色＝♯</span>。
@@ -3209,6 +3386,72 @@ body {
 .fr-meta { font-size: 12px; color: var(--ink-60); }
 .fr-hz { font-size: 11px; color: var(--ink-30); font-variant-numeric: tabular-nums; }
 .fr-msg { font-size: 12px; color: var(--ink-30); }
+.fb-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* ---------- 全画面（没入モード） ---------- */
+.exit-full {
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top));
+  right: calc(10px + env(safe-area-inset-right));
+  z-index: 60;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: rgba(255,255,255,.92);
+  color: var(--ink-60);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(16,19,28,.16);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+.turn-hint {
+  margin: 8px 0 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ink-30);
+}
+
+.app[data-immersive="true"] { overflow: hidden; }
+.app[data-immersive="true"] .head,
+.app[data-immersive="true"] .metronome,
+.app[data-immersive="true"] .foot,
+.app[data-immersive="true"] .finger-area > .label,
+.app[data-immersive="true"] .rotate-hint { display: none; }
+
+.app[data-immersive="true"] .finger-area {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  margin: 0;
+  background: var(--paper);
+  padding:
+    calc(10px + env(safe-area-inset-top))
+    calc(10px + env(safe-area-inset-right))
+    calc(10px + env(safe-area-inset-bottom))
+    calc(10px + env(safe-area-inset-left));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.app[data-immersive="true"] .fr {
+  margin-bottom: 0;
+  padding: 8px 44px 8px 12px;
+  min-height: 0;
+}
+.app[data-immersive="true"] .fb { flex: 1; min-height: 0; }
+.app[data-immersive="true"] .fb-svg {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+}
 
 /* 鍵盤 */
 .kb { display: flex; flex-direction: column; gap: 10px; }
@@ -3613,6 +3856,12 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
   .fr-oct { font-size: 12px; }
   .fr-alt, .fr-meta { font-size: 10px; }
   .fr-hz, .fr-msg { font-size: 9px; }
+
+  .app[data-immersive="true"] .finger-area {
+    display: flex; flex-direction: column; gap: 6px; padding-top: 8px;
+  }
+  .app[data-immersive="true"] .fr { padding: 5px 46px 5px 10px; }
+  .exit-full { width: 32px; height: 32px; font-size: 13px; }
   .kb { gap: 5px; flex: 1; min-height: 0; }
   .kb-svg { flex: 1; min-height: 0; max-height: 100%; width: auto; margin: 0 auto; }
   .kb-now { min-height: 26px; }

@@ -941,33 +941,118 @@ function useMetronome(audio, bpm, time, blankRef) {
 }
 
 /* ============================================================
- *  バイオリンらしい音を鳴らす
+ *  バイオリンの音（弓弦の物理モデル）
  *
- *  弓で擦った弦はほぼのこぎり波（ヘルムホルツ運動）なので、そこを土台にして
- *  本物と電子音を分けている要素を足していく。
- *   ・弓が弦を掴むまでの立ち上がり（90ms かけて開く）と、擦れ音のノイズ
- *   ・少し遅れて効いてくるビブラート
- *   ・胴の共鳴（バンドパスを並列にして箱鳴りを作る）
- *   ・鳴り始めに音が明るくなる（フィルタを開く）
+ *  波形を合成するのではなく、弦そのものを計算する。
+ *  弦を「駒側」「ナット側」2本の遅延線で表し、その間に弓を置く。
+ *  弓の摩擦は「食いつく → 滑る」という非線形なやり取りで、
+ *  ここからヘルムホルツ運動（＝あののこぎり状の波）が自然に立ち上がる。
+ *  オシレータを重ねただけの音と違い、立ち上がりも倍音も勝手に本物に寄る。
  * ============================================================ */
+function bowParams(freq) {
+  return {
+    bowPos: 0.18, // 駒からの弓の位置（弦長比）
+    filterPole: 0.12, // 駒での反射で高音が丸まる度合い
+    // 高い音ほど弓を軽く。重いままだと擦れて音程が定まらない
+    slope: 1.6 * (1 + freq / 800),
+    maxVel: 0.22 * (1 - 0.3 * Math.min(1, freq / 1000)),
+  }
+}
+
+function renderBowedString(freq, sampleRate, seconds) {
+  const { bowPos, filterPole, slope, maxVel } = bowParams(freq)
+  const reflect = 0.95
+  const attack = 0.06
+  const vibRate = 5.3
+  const vibDepth = 0.0018
+  const vibDelay = 0.28
+
+  const N = Math.floor(sampleRate * seconds)
+  const maxPeriod = Math.ceil(sampleRate / (freq * 0.98)) + 8
+  const bridgeBuf = new Float32Array(maxPeriod)
+  const neckBuf = new Float32Array(maxPeriod)
+  const out = new Float32Array(N)
+  let bw = 0
+  let nw = 0
+  let lp = 0
+
+  // 反射フィルタの位相遅れ。差し引かないと音程がぶら下がる
+  const w0 = (2 * Math.PI * freq) / sampleRate
+  const loopComp = Math.atan2(filterPole * Math.sin(w0), 1 - filterPole * Math.cos(w0)) / w0
+
+  const read = (buf, w, delay) => {
+    let rp = w - delay
+    while (rp < 0) rp += maxPeriod
+    const i0 = Math.floor(rp)
+    const frac = rp - i0
+    const i1 = i0 + 1 >= maxPeriod ? 0 : i0 + 1
+    return buf[i0] * (1 - frac) + buf[i1] * frac
+  }
+
+  for (let n = 0; n < N; n++) {
+    const t = n / sampleRate
+    const vib =
+      t < vibDelay
+        ? 1
+        : 1 +
+          vibDepth *
+            Math.min(1, (t - vibDelay) / 0.6) *
+            Math.sin(2 * Math.PI * vibRate * (t - vibDelay))
+    const total = sampleRate / (freq * vib) - loopComp
+    const dBridge = Math.max(1.2, total * bowPos)
+    const dNeck = Math.max(1.2, total * (1 - bowPos))
+
+    const bridgeOut = read(bridgeBuf, bw, dBridge)
+    const neckOut = read(neckBuf, nw, dNeck)
+
+    lp += (1 - filterPole) * (bridgeOut - lp)
+    const bridgeRefl = -lp * reflect
+    const nutRefl = -neckOut
+
+    const env = Math.min(1, t / attack)
+    const deltaV = maxVel * env - (bridgeRefl + nutRefl)
+
+    // 弓の摩擦テーブル（食いつくと 1、滑ると 0 へ）
+    let f = Math.abs(deltaV * slope) + 0.75
+    f = 1 / (f * f * f * f)
+    if (f > 1) f = 1
+    const newVel = deltaV * f
+
+    neckBuf[nw] = bridgeRefl + newVel
+    bridgeBuf[bw] = nutRefl + newVel
+    nw = nw + 1 >= maxPeriod ? 0 : nw + 1
+    bw = bw + 1 >= maxPeriod ? 0 : bw + 1
+
+    out[n] = bridgeOut
+  }
+  return out
+}
+
+/* 胴の共鳴。弦の音を箱に通して体積を与える */
 const BODY_RESONANCE = [
   [275, 3.0, 0.5], // 空気の共鳴
   [460, 4.0, 0.34], // 表板
   [720, 5.0, 0.2],
-  [2600, 1.6, 0.26], // ブリッジ・ヒル（明るさのもと）
+  [2600, 1.6, 0.26], // ブリッジ・ヒル
 ]
+
+const TONE_SECONDS = 2.6
+const TONE_LOOP_FROM = 1.2
 
 function useViolinSynth(audio) {
   const voiceRef = useRef(null)
-  const noiseRef = useRef({ ctx: null, buffer: null })
+  const cacheRef = useRef({ ctx: null, map: new Map() })
 
-  const noiseBuffer = useCallback((ctx) => {
-    if (noiseRef.current.ctx === ctx && noiseRef.current.buffer) return noiseRef.current.buffer
-    const len = Math.floor(ctx.sampleRate * 0.5)
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate)
-    const data = buf.getChannelData(0)
-    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1
-    noiseRef.current = { ctx, buffer: buf }
+  const bufferFor = useCallback((ctx, freq, key) => {
+    if (cacheRef.current.ctx !== ctx) cacheRef.current = { ctx, map: new Map() }
+    const hit = cacheRef.current.map.get(key)
+    if (hit) return hit
+
+    const sr = ctx.sampleRate
+    const data = renderBowedString(freq, sr, TONE_SECONDS)
+    const buf = ctx.createBuffer(1, data.length, sr)
+    buf.copyToChannel ? buf.copyToChannel(data, 0) : buf.getChannelData(0).set(data)
+    cacheRef.current.map.set(key, buf)
     return buf
   }, [])
 
@@ -975,72 +1060,44 @@ function useViolinSynth(audio) {
     const v = voiceRef.current
     if (!v) return
     voiceRef.current = null
-    const { ctx, env, nodes } = v
+    const { ctx, env, src } = v
     if (ctx.state === 'closed') return
     const now = ctx.currentTime
     try {
       env.gain.cancelScheduledValues(now)
       env.gain.setValueAtTime(Math.max(env.gain.value, 0.0001), now)
-      // 弓を離すと音は素早く、でも切り落とさずに消える
-      env.gain.exponentialRampToValueAtTime(0.0001, now + 0.22)
-      nodes.forEach((n) => n.stop(now + 0.3))
+      env.gain.exponentialRampToValueAtTime(0.0001, now + 0.2)
+      src.stop(now + 0.26)
     } catch {
       /* すでに止まっていれば何もしない */
     }
   }, [])
 
   const play = useCallback(
-    async (freq) => {
+    async (freq, key) => {
       const ctx = await audio.ensure()
       release()
       const now = ctx.currentTime
+      const sr = ctx.sampleRate
+      const buf = bufferFor(ctx, freq, key ?? Math.round(freq * 10))
 
-      const src = ctx.createGain()
-      src.gain.value = 0.33
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      // 押し続けたときのために、音が安定した区間を周期の整数倍でつなぐ
+      const period = sr / freq
+      const from = Math.floor(sr * TONE_LOOP_FROM)
+      const room = buf.length - from - 8
+      const cycles = Math.max(1, Math.floor(room / period))
+      src.loop = true
+      src.loopStart = from / sr
+      src.loopEnd = (from + Math.round(cycles * period)) / sr
+
       const env = ctx.createGain()
       const out = ctx.createGain()
-      out.gain.value = 0.45
+      out.gain.value = 0.5
 
-      /* 弦：わずかにずらしたのこぎり波を3本 */
-      const oscs = [0, -7, 8].map((cents) => {
-        const o = ctx.createOscillator()
-        o.type = 'sawtooth'
-        o.frequency.value = freq
-        o.detune.value = cents
-        o.connect(src)
-        return o
-      })
-
-      /* ビブラート。弾き始めからではなく、少し遅れて掛かる */
-      const lfo = ctx.createOscillator()
-      lfo.type = 'sine'
-      lfo.frequency.value = 5.4
-      const lfoDepth = ctx.createGain()
-      lfoDepth.gain.setValueAtTime(0, now)
-      lfoDepth.gain.setValueAtTime(0, now + 0.25)
-      lfoDepth.gain.linearRampToValueAtTime(13, now + 0.9) // セント
-      lfo.connect(lfoDepth)
-      oscs.forEach((o) => lfoDepth.connect(o.detune))
-
-      /* 弓の擦れ音。最初だけ強く、すぐ落ち着く */
-      const noise = ctx.createBufferSource()
-      noise.buffer = noiseBuffer(ctx)
-      noise.loop = true
-      const nbp = ctx.createBiquadFilter()
-      nbp.type = 'bandpass'
-      nbp.frequency.value = Math.min(5200, freq * 4)
-      nbp.Q.value = 0.9
-      const nGain = ctx.createGain()
-      nGain.gain.setValueAtTime(0.0001, now)
-      nGain.gain.exponentialRampToValueAtTime(0.05, now + 0.03)
-      nGain.gain.exponentialRampToValueAtTime(0.006, now + 0.3)
-      noise.connect(nbp).connect(nGain).connect(src)
-
-      src.connect(env)
-
-      /* 胴の共鳴：素の音に並列のバンドパスを混ぜる */
       const dry = ctx.createGain()
-      dry.gain.value = 0.55
+      dry.gain.value = 0.6
       env.connect(dry).connect(out)
       BODY_RESONANCE.forEach(([f, q, g]) => {
         const bp = ctx.createBiquadFilter()
@@ -1052,25 +1109,17 @@ function useViolinSynth(audio) {
         env.connect(bp).connect(bg).connect(out)
       })
 
-      /* 鳴り始めに明るくなる */
-      const lp = ctx.createBiquadFilter()
-      lp.type = 'lowpass'
-      lp.Q.value = 0.5
-      lp.frequency.setValueAtTime(Math.min(2600, freq * 3), now)
-      lp.frequency.linearRampToValueAtTime(Math.min(9000, freq * 9), now + 0.2)
-      out.connect(lp).connect(ctx.destination)
+      src.connect(env)
+      out.connect(ctx.destination)
 
-      /* 弓が弦を掴むまでの間。ここを速くすると途端に電子音になる */
+      // 立ち上がりはモデル側が持っているので、ここは繋ぎ目を消すだけ
       env.gain.setValueAtTime(0.0001, now)
-      env.gain.exponentialRampToValueAtTime(0.3, now + 0.09)
-      env.gain.exponentialRampToValueAtTime(0.24, now + 0.45)
+      env.gain.exponentialRampToValueAtTime(0.9, now + 0.012)
+      src.start(now)
 
-      const nodes = [...oscs, lfo, noise]
-      nodes.forEach((n) => n.start(now))
-
-      voiceRef.current = { ctx, env, nodes }
+      voiceRef.current = { ctx, env, src }
     },
-    [audio, noiseBuffer, release]
+    [audio, bufferFor, release]
   )
 
   useEffect(() => () => release(), [release])
@@ -1086,7 +1135,17 @@ function useViolinSynth(audio) {
  * ============================================================ */
 function useImmersive() {
   const [on, setOn] = useState(false)
+  const [deviceLandscape, setDeviceLandscape] = useState(false)
   const wakeRef = useRef(null)
+
+  /* 端末が今どちらを向いているか。ロック中はこれを見て打ち消す */
+  useEffect(() => {
+    const mql = window.matchMedia('(orientation: landscape)')
+    const sync = (e) => setDeviceLandscape(e.matches)
+    sync(mql)
+    mql.addEventListener('change', sync)
+    return () => mql.removeEventListener('change', sync)
+  }, [])
 
   const requestWakeLock = useCallback(async () => {
     try {
@@ -1110,11 +1169,22 @@ function useImmersive() {
     } catch {
       /* 使えない環境では CSS だけで広げる */
     }
+    // 使える端末では OS 側にも縦固定を頼む（iPhone の Safari は非対応）
+    try {
+      await screen.orientation?.lock?.('portrait')
+    } catch {
+      /* 断られても CSS 側で打ち消すので問題ない */
+    }
     requestWakeLock()
   }, [requestWakeLock])
 
   const exit = useCallback(() => {
     setOn(false)
+    try {
+      screen.orientation?.unlock?.()
+    } catch {
+      /* 無視してよい */
+    }
     try {
       if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen()
       else if (document.webkitFullscreenElement && document.webkitExitFullscreen)
@@ -1126,7 +1196,6 @@ function useImmersive() {
     wakeRef.current = null
   }, [])
 
-  /* ブラウザ側で全画面を抜けたとき（Esc やジェスチャ）に合わせる */
   useEffect(() => {
     const sync = () => {
       const fs = document.fullscreenElement || document.webkitFullscreenElement
@@ -1140,7 +1209,6 @@ function useImmersive() {
     }
   }, [])
 
-  /* Esc で抜ける（Fullscreen API を使えない環境向け） */
   useEffect(() => {
     if (!on) return
     const onKey = (e) => {
@@ -1150,7 +1218,6 @@ function useImmersive() {
     return () => window.removeEventListener('keydown', onKey)
   }, [on, exit])
 
-  /* 画面を離れて戻ったら、消灯防止を取り直す */
   useEffect(() => {
     if (!on) return
     const onVisible = () => {
@@ -1168,7 +1235,10 @@ function useImmersive() {
     []
   )
 
-  return { on, enter, exit }
+  /* 端末が横を向いているのに縦で固定したいときは、中身を回して打ち消す */
+  const counterRotate = on && deviceLandscape
+
+  return { on, enter, exit, counterRotate }
 }
 
 /* ============================================================
@@ -2570,13 +2640,15 @@ function Studio() {
     // 運指ではマイクを使わないので閉じておく
     if (next === 'finger' && pitch.running) pitch.stop()
     setTab(next)
+    // 運指はそのまま練習に入れるよう、開いた時点で全画面にする
+    if (next === 'finger') immersive.enter()
   }
 
   const pressFret = useCallback(
     (row, col) => {
       const midi = STRINGS[row].midi + FRETS[col].offset
       setFinger({ row, col, midi })
-      if (sound) synth.play(midiToFreq(midi, a4))
+      if (sound) synth.play(midiToFreq(midi, a4), `${midi}:${a4}`)
     },
     [a4, sound, synth]
   )
@@ -2679,7 +2751,8 @@ function Studio() {
   }
 
   return (
-    <div className="app" data-state={tunerState} data-mode={mode} data-tab={tab} data-immersive={immersive.on}>
+    <div className="app" data-state={tunerState} data-mode={mode} data-tab={tab} data-immersive={immersive.on}
+      data-rotate={immersive.counterRotate}>
       <style>{CSS}</style>
 
       <header className="head">
@@ -3417,364 +3490,6 @@ body {
   color: var(--ink-30);
 }
 
-.app[data-immersive="true"] { overflow: hidden; }
-.app[data-immersive="true"] .head,
-.app[data-immersive="true"] .metronome,
-.app[data-immersive="true"] .foot,
-.app[data-immersive="true"] .finger-area > .label,
-.app[data-immersive="true"] .rotate-hint { display: none; }
-
-.app[data-immersive="true"] .finger-area {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  margin: 0;
-  background: var(--paper);
-  padding:
-    calc(10px + env(safe-area-inset-top))
-    calc(10px + env(safe-area-inset-right))
-    calc(10px + env(safe-area-inset-bottom))
-    calc(10px + env(safe-area-inset-left));
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.app[data-immersive="true"] .fr {
-  margin-bottom: 0;
-  padding: 8px 44px 8px 12px;
-  min-height: 0;
-}
-.app[data-immersive="true"] .fb { flex: 1; min-height: 0; }
-.app[data-immersive="true"] .fb-svg {
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  height: 100%;
-  max-height: 100%;
-}
-
-/* 鍵盤 */
-.kb { display: flex; flex-direction: column; gap: 10px; }
-.kb-svg { display: block; width: 100%; height: auto; }
-.kb-white {
-  fill: var(--paper);
-  stroke: #d8d8d2;
-  stroke-width: 1;
-  transition: fill .1s;
-}
-.kb-black { fill: #2a2d38; transition: fill .1s; }
-.kb-label {
-  font-size: 13px;
-  fill: var(--ink-60);
-  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
-  font-weight: 600;
-}
-.kb-sharp {
-  font-size: 9px;
-  fill: #ff8b84;
-  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
-  font-weight: 700;
-}
-.kb-flat {
-  font-size: 9px;
-  fill: #8fb4f2;
-  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
-  font-weight: 700;
-}
-.kb-oct-on {
-  font-size: 11px;
-  fill: #fff;
-  font-weight: 700;
-  opacity: .85;
-}
-
-.kb-now {
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 6px;
-  min-height: 40px;
-}
-.kb-now-name {
-  font-size: 34px;
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: .02em;
-}
-.kb-now-name.idle { color: var(--ink-30); }
-.kb-now-oct { font-size: 18px; color: var(--ink-30); font-weight: 600; }
-.kb-now-alt { font-size: 11px; color: var(--ink-60); }
-
-/* 現在の Hz とセント */
-.voice-read {
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--ink-60);
-  font-variant-numeric: tabular-nums;
-}
-.voice-read[data-state="ok"] .voice-cents { color: var(--ok); font-weight: 700; }
-.voice-read[data-state="high"] .voice-cents { color: var(--high); font-weight: 700; }
-.voice-read[data-state="low"] .voice-cents { color: var(--low); font-weight: 700; }
-.voice-sep { color: var(--ink-30); }
-.voice-hz.idle { color: var(--ink-30); }
-
-.voice-bar {
-  position: relative;
-  height: 22px;
-  border-bottom: 1px solid var(--line);
-}
-.vb-zone {
-  position: absolute; bottom: 0; left: 45%; width: 10%; height: 100%;
-  background: rgba(15,138,69,.1);
-}
-.vb-center {
-  position: absolute; bottom: 0; left: 50%; width: 1px; height: 100%;
-  background: var(--line); transform: translateX(-50%);
-}
-.vb-needle {
-  position: absolute; bottom: 0; width: 2px; height: 100%; border-radius: 1px;
-  background: var(--ink-30); transform: translateX(-50%);
-  transition: left .07s linear, background .12s;
-}
-.voice-bar[data-state="ok"] .vb-needle { background: var(--ok); }
-.voice-bar[data-state="high"] .vb-needle { background: var(--high); }
-.voice-bar[data-state="low"] .vb-needle { background: var(--low); }
-
-/* 楽譜 */
-.score {
-  position: relative;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--paper);
-  min-height: 220px;
-  padding: 10px 6px;
-  overflow-x: hidden;
-  transition: border-color .2s;
-}
-.score[data-playing="true"] { border-color: var(--accent); }
-.score-inner { position: relative; width: 100%; }
-.score-host { width: 100%; }
-.score-host svg { display: block; max-width: 100%; height: auto; }
-.score-msg {
-  position: absolute;
-  inset: 0;
-  margin: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 28px;
-  text-align: center;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--ink-30);
-  background: var(--paper);
-  border-radius: 14px;
-}
-.score-msg.error { color: var(--high); }
-
-/* 外れ方の札 */
-.marks { position: absolute; inset: 0; pointer-events: none; }
-.mark {
-  position: absolute;
-  transform: translate(-50%, -100%);
-  margin-top: -3px;
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: #fff;
-  border: 1px solid var(--c);
-  color: var(--c);
-  box-shadow: 0 1px 3px rgba(16,19,28,.12);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1.5;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.mark-arrow { font-size: 8px; }
-
-.score-controls { margin-top: 12px; display: flex; gap: 8px; align-items: stretch; }
-.score-count {
-  display: flex;
-  align-items: center;
-  padding: 0 10px;
-  font-size: 12px;
-  color: var(--accent);
-  background: #eef0f9;
-  border-radius: 10px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  flex: 1;
-}
-.mini {
-  font-size: 12px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--paper);
-  color: var(--ink);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.mini:disabled { color: var(--ink-30); cursor: default; }
-.mini.grow { flex: 1; }
-
-.summary {
-  margin: 12px 2px 0;
-  font-size: 13px;
-  color: var(--ink);
-  background: var(--paper-2);
-  border-radius: 10px;
-  padding: 10px 12px;
-  line-height: 1.6;
-}
-.summary b { color: var(--ok); }
-
-/* メトロノーム */
-.metro {
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.beats { display: flex; gap: 8px; align-items: center; justify-content: center; height: 22px; }
-.beat {
-  width: 12px; height: 12px; border-radius: 50%;
-  background: var(--paper-2);
-  border: 1px solid var(--line);
-  transition: transform .06s ease-out, background .06s, border-color .06s;
-}
-.beat[data-accent="true"] { width: 15px; height: 15px; }
-.beat[data-on="true"] { background: var(--accent); border-color: var(--accent); transform: scale(1.35); }
-.beat[data-accent="true"][data-on="true"] { background: var(--ink); border-color: var(--ink); }
-
-.metro-row { display: flex; gap: 8px; align-items: stretch; }
-.bpm {
-  display: flex; align-items: center; gap: 2px;
-  border: 1px solid var(--line); border-radius: 10px; padding: 0 4px;
-  font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap;
-}
-.bpm button {
-  border: 0; background: none; color: var(--accent);
-  font-size: 17px; padding: 6px 9px; cursor: pointer;
-}
-.bpm-val b { font-size: 15px; }
-.metro-btn {
-  flex: 1;
-  border: 1px solid var(--accent); border-radius: 10px;
-  background: var(--paper); color: var(--accent);
-  font-size: 13px; font-weight: 600; cursor: pointer; padding: 8px;
-}
-.metro-btn[data-on="true"] { background: var(--accent); color: #fff; }
-.bpm-slider { width: 100%; accent-color: var(--accent); }
-
-/* 音名表示 */
-.readout-block { border-top: 1px solid var(--line); padding-top: 22px; }
-.readout { text-align: center; }
-.note {
-  font-family: Iowan Old Style, "Times New Roman", serif;
-  line-height: 1;
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 2px;
-  color: var(--ink-30);
-  transition: color .12s;
-}
-.app[data-state="ok"] .note { color: var(--ok); }
-.app[data-state="high"] .note { color: var(--high); }
-.app[data-state="low"] .note { color: var(--low); }
-.note-name { font-size: 72px; font-weight: 500; }
-.note-name sup { font-size: 30px; }
-.note-oct { font-size: 26px; color: var(--ink-30); }
-.freq { margin-top: 6px; font-size: 12px; color: var(--ink-60); font-variant-numeric: tabular-nums; }
-
-/* チューニング中は下の大きい音名とメーターを畳む（文字盤と重複するため） */
-.app[data-tab="tuning"] .readout,
-.app[data-tab="tuning"] .meter { display: none; }
-.app[data-tab="tuning"] .readout-block { border-top: 0; padding-top: 0; }
-.app[data-tab="tuning"] .controls { margin-top: 0; }
-
-/* メーター */
-.meter { margin-top: 22px; }
-.meter-scale { position: relative; height: 44px; border-bottom: 1px solid var(--line); }
-.tick {
-  position: absolute; bottom: 0; width: 1px; height: 8px;
-  background: var(--ink-30); transform: translateX(-50%);
-}
-.tick[data-center="true"] { height: 100%; background: var(--line); }
-.meter-zone {
-  position: absolute; bottom: 0; left: 42%; width: 16%; height: 100%;
-  background: rgba(15,138,69,.07);
-}
-.needle {
-  position: absolute; bottom: 0; width: 2px; height: 100%;
-  background: var(--ink-30); transform: translateX(-50%);
-  transition: left .07s linear, background .12s; border-radius: 1px;
-}
-.meter[data-state="ok"] .needle { background: var(--ok); }
-.meter[data-state="high"] .needle { background: var(--high); }
-.meter[data-state="low"] .needle { background: var(--low); }
-.meter-labels {
-  display: flex; justify-content: space-between; margin-top: 7px;
-  font-size: 11px; color: var(--ink-30);
-}
-.lab-low { color: var(--low); }
-.lab-high { color: var(--high); }
-.cents { color: var(--ink-60); font-variant-numeric: tabular-nums; }
-
-.level { margin-top: 16px; height: 3px; background: var(--paper-2); border-radius: 2px; overflow: hidden; }
-.level-bar { height: 100%; background: var(--accent); opacity: .35; transition: width .08s linear; }
-
-.controls { margin-top: 18px; display: flex; align-items: stretch; gap: 10px; }
-.mic {
-  flex: 1; padding: 15px 10px; border: 0; border-radius: 12px;
-  background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
-  font-variant-numeric: tabular-nums;
-}
-.mic[data-phase="armed"] { background: #6b74a8; }
-.mic[data-phase="countin"] { background: var(--ink); }
-.mic[data-phase="playing"] { background: var(--ok); }
-.reset {
-  padding: 0 16px; border: 1px solid var(--line); border-radius: 12px;
-  background: var(--paper); color: var(--ink-60); font-size: 13px; cursor: pointer;
-}
-.reset:disabled { color: var(--ink-30); cursor: default; }
-.a4 {
-  margin-top: 12px; font-size: 11px; color: var(--ink-60);
-  display: flex; align-items: center; gap: 8px;
-}
-.a4 select {
-  font-size: 13px; padding: 6px 8px; border: 1px solid var(--line);
-  border-radius: 8px; background: var(--paper); color: var(--ink);
-}
-.error { margin: 14px 0 0; font-size: 12px; color: var(--high); line-height: 1.6; }
-.notice { margin: 12px 0 0; font-size: 11px; color: var(--ink-60); line-height: 1.6; }
-.foot { font-size: 11px; color: var(--ink-30); text-align: center; }
-
-/* クラッシュ画面 */
-.crash { max-width: 480px; margin: 0 auto; padding: 40px 20px; background: var(--paper); min-height: 100%; }
-.crash h2 { font-size: 17px; margin: 0 0 8px; }
-.crash p { font-size: 13px; color: var(--ink-60); margin: 0 0 14px; }
-.crash pre {
-  font-size: 11px; color: var(--high); background: var(--paper-2);
-  padding: 10px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word;
-}
-.crash button {
-  margin-top: 14px; padding: 12px 18px; border: 0; border-radius: 12px;
-  background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
-}
-
-button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
-
 /* ============================================================
  *  横画面（スマホ横持ち）
  * ============================================================ */
@@ -3857,11 +3572,6 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
   .fr-alt, .fr-meta { font-size: 10px; }
   .fr-hz, .fr-msg { font-size: 9px; }
 
-  .app[data-immersive="true"] .finger-area {
-    display: flex; flex-direction: column; gap: 6px; padding-top: 8px;
-  }
-  .app[data-immersive="true"] .fr { padding: 5px 46px 5px 10px; }
-  .exit-full { width: 32px; height: 32px; font-size: 13px; }
   .kb { gap: 5px; flex: 1; min-height: 0; }
   .kb-svg { flex: 1; min-height: 0; max-height: 100%; width: auto; margin: 0 auto; }
   .kb-now { min-height: 26px; }
@@ -3902,5 +3612,61 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
   .bpm-val b { font-size: 13px; }
   .metro-btn { padding: 6px; font-size: 11px; }
   .bpm-slider { display: none; }
+}
+
+/* ============================================================
+ *  全画面（運指モード）
+ *  ここは画面の向きに関係なく同じ見え方にしたいので、
+ *  横画面のメディアクエリより後ろに置いて上書きする。
+ * ============================================================ */
+.app[data-immersive="true"] { overflow: hidden; }
+.app[data-immersive="true"] .head,
+.app[data-immersive="true"] .metronome,
+.app[data-immersive="true"] .foot,
+.app[data-immersive="true"] .finger-area > .label,
+.app[data-immersive="true"] .rotate-hint { display: none; }
+
+.app[data-immersive="true"] .finger-area {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  margin: 0;
+  background: var(--paper);
+  padding:
+    calc(12px + env(safe-area-inset-top))
+    calc(12px + env(safe-area-inset-right))
+    calc(12px + env(safe-area-inset-bottom))
+    calc(12px + env(safe-area-inset-left));
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+}
+.app[data-immersive="true"] .fr {
+  margin-bottom: 0;
+  padding: 9px 52px 9px 14px;
+  min-height: 0;
+  flex: 0 0 auto;
+}
+.app[data-immersive="true"] .fb { flex: 0 1 auto; gap: 10px; }
+.app[data-immersive="true"] .fb-svg { width: 100%; height: auto; max-height: 100%; }
+.app[data-immersive="true"] .fb-legend { flex: 0 0 auto; }
+
+/* 端末が横を向いても、中身を回して縦のまま見せる */
+.app[data-rotate="true"] .finger-area {
+  top: 0;
+  left: 0;
+  right: auto;
+  bottom: auto;
+  width: 100vh;
+  height: 100vw;
+  transform-origin: 0 0;
+  transform: translateY(100vh) rotate(-90deg);
+  padding: 16px;
+}
+.app[data-rotate="true"] .exit-full {
+  position: absolute;
+  top: 10px;
+  right: 10px;
 }
 `

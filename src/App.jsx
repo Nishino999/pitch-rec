@@ -2371,7 +2371,7 @@ function fbLayout(vertical) {
   }
 }
 
-function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, next, immersive, vertical }) {
+function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, next, pressed, immersive, vertical }) {
   const L = useMemo(() => fbLayout(vertical), [vertical])
   const px = (r, c) => (L.vertical ? L.x(r) : L.x(r, c))
   const py = (r, c) => (L.vertical ? L.y(c) : L.y(c, r))
@@ -2414,6 +2414,7 @@ function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, next, i
             const jp = JP_NAMES[pc]
             const on = current && current.row === r && current.col === c
             const soon = !on && next && next.row === r && next.col === c
+            const held = pressed && pressed.row === r && pressed.col === c
             const cx = px(r, c)
             const cy = py(r, c)
             return (
@@ -2423,6 +2424,7 @@ function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, next, i
                 data-sharp={!!jp.flat}
                 data-on={on}
                 data-next={soon}
+                data-held={held}
                 onPointerDown={(e) => {
                   e.preventDefault()
                   onPress(r, c)
@@ -2795,6 +2797,7 @@ function Studio() {
 
   const [sound, setSound] = useState(true)
   const [finger, setFinger] = useState(null) // 押さえている位置
+  const [demoMode, setDemoMode] = useState('play') // play=指で止まる / along=止まらない
   const cards = useDragScroll()
 
   useEffect(() => {
@@ -2888,17 +2891,20 @@ function Studio() {
 
   const pressFret = useCallback(
     (row, col) => {
-      demo.stop()
+      // 連続モードではお手本を止めず、そのまま一緒に弾ける
+      if (demoMode === 'play') demo.stop()
       const midi = STRINGS[row].midi + FRETS[col].offset
       setFinger({ row, col, midi })
       if (sound) synth.play(midiToFreq(midi, a4), `${midi}:${a4}`)
     },
-    [a4, demo, sound, synth]
+    [a4, demo, demoMode, sound, synth]
   )
 
   const releaseFret = useCallback(() => {
     synth.release()
-  }, [synth])
+    // 連続モードでは指を離した印を残さない（お手本の光が見づらくなるため）
+    if (demoMode === 'along' && demo.status === 'playing') setFinger(null)
+  }, [demo.status, demoMode, synth])
 
   /* 外れた音符の上に置く札（練習モードのみ） */
   const [badges, setBadges] = useState([])
@@ -3133,6 +3139,14 @@ function Studio() {
 
           <div className="demo-row">
             <span className="demo-label">お手本</span>
+            <span className="seg tiny" role="group" aria-label="お手本の動き方">
+              <button data-on={demoMode === 'play'} onClick={() => setDemoMode('play')}>
+                演奏
+              </button>
+              <button data-on={demoMode === 'along'} onClick={() => setDemoMode('along')}>
+                連続
+              </button>
+            </span>
             <span className="demo-songs">
               {SONGS.map((sg) => (
                 <button
@@ -3161,6 +3175,7 @@ function Studio() {
             onRelease={releaseFret}
             current={shownFret}
             next={demo.pos.next}
+            pressed={demo.status === 'playing' ? finger : null}
             immersive={immersive}
             vertical={immersive.on}
           />
@@ -3168,6 +3183,7 @@ function Studio() {
           <p className="hint rotate-hint">
             押している間だけ音が鳴ります。いちばん左の列は開放弦なので、指では押さえずに弾く音です。
             白＝そのままの音、<span className="sw-high">桃色＝♯</span>。
+            お手本は<b>演奏</b>＝指板に触れると止まる、<b>連続</b>＝触れても止まらず一緒に弾ける。
           </p>
         </section>
       )}
@@ -3734,6 +3750,12 @@ body {
 .fb-dot[data-sharp="true"][data-next="true"] .fb-pad { fill: #f2c7d8; stroke: var(--high); }
 .fb-dot[data-next="true"] .fb-text { fill: var(--accent); }
 
+/* 連続モードで自分が押している場所（お手本の光と重ねて見せる） */
+.fb-dot[data-held="true"] .fb-pad {
+  stroke: var(--ink);
+  stroke-width: 4;
+}
+
 /* お手本の選択 */
 .demo-row {
   display: flex;
@@ -3748,6 +3770,13 @@ body {
   color: var(--ink-60);
   flex-shrink: 0;
 }
+.seg.tiny {
+  flex-shrink: 0;
+  padding: 3px;
+  border-radius: 9px;
+  gap: 2px;
+}
+.seg.tiny button { padding: 5px 9px; font-size: 11px; border-radius: 7px; }
 .demo-songs {
   display: flex;
   gap: 6px;
@@ -3967,6 +3996,7 @@ body {
 .app[data-immersive="true"] .fb-strings { font-size: 10px; }
 .app[data-immersive="true"] .demo-row { margin-bottom: 0; flex: 0 0 auto; gap: 6px; }
 .app[data-immersive="true"] .demo-label { display: none; }
+.app[data-immersive="true"] .seg.tiny button { padding: 4px 8px; font-size: 10px; }
 .app[data-immersive="true"] .demo-row .mini { padding: 6px 9px; font-size: 11px; }
 
 /* 端末が横を向いても、中身を回して縦のまま見せる */

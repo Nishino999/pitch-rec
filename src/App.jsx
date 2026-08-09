@@ -122,6 +122,28 @@ const STRINGS = [
   { id: 'G', label: 'G', num: '4弦', ja: 'ソ', note: 'G3' },
 ].map((s) => ({ ...s, midi: noteToMidi(s.note) }))
 
+/* ---------- 第1ポジションの指板 ----------
+ * 開放弦から半音いくつ上か（0＝開放）。1指と2指と3指はそれぞれ低い／高い の2か所を取る。
+ */
+const FRETS = [
+  { offset: 0, finger: 0 },
+  { offset: 1, finger: 1 },
+  { offset: 2, finger: 1 },
+  { offset: 3, finger: 2 },
+  { offset: 4, finger: 2 },
+  { offset: 5, finger: 3 },
+  { offset: 6, finger: 3 },
+  { offset: 7, finger: 4 },
+]
+
+const FINGERS = [
+  { id: 0, mark: '⓪', name: '押さえない' },
+  { id: 1, mark: '①', name: '人差し指' },
+  { id: 2, mark: '②', name: '中指' },
+  { id: 3, mark: '③', name: '薬指' },
+  { id: 4, mark: '④', name: '小指' },
+]
+
 /* ---------- デモ曲（すべてパブリックドメイン） ---------- */
 const SONGS = [
   {
@@ -916,6 +938,82 @@ function useMetronome(audio, bpm, time, blankRef) {
   useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
 
   return { running, beat, start, stop, runningRef, originRef }
+}
+
+/* ============================================================
+ *  バイオリンらしい音を鳴らす
+ *  のこぎり波を2本わずかにずらして重ね、低域通過フィルタで角を落とす。
+ *  押している間だけ鳴らし、離したら短く減衰させる（弓を引く感じ）。
+ * ============================================================ */
+function useViolinSynth(audio) {
+  const voiceRef = useRef(null)
+
+  const release = useCallback(() => {
+    const v = voiceRef.current
+    if (!v) return
+    voiceRef.current = null
+    const { ctx, gain, oscs } = v
+    if (ctx.state === 'closed') return
+    const now = ctx.currentTime
+    try {
+      gain.gain.cancelScheduledValues(now)
+      gain.gain.setValueAtTime(Math.max(gain.gain.value, 0.0001), now)
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18)
+      oscs.forEach((o) => o.stop(now + 0.22))
+    } catch {
+      /* すでに止まっていれば何もしない */
+    }
+  }, [])
+
+  const play = useCallback(
+    async (freq) => {
+      const ctx = await audio.ensure()
+      release()
+      const now = ctx.currentTime
+
+      const gain = ctx.createGain()
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'lowpass'
+      filter.frequency.value = Math.min(7000, freq * 7)
+      filter.Q.value = 0.7
+
+      const o1 = ctx.createOscillator()
+      o1.type = 'sawtooth'
+      o1.frequency.value = freq
+
+      const o2 = ctx.createOscillator()
+      o2.type = 'sawtooth'
+      o2.frequency.value = freq
+      o2.detune.value = 7 // わずかにずらすと厚みが出る
+      const g2 = ctx.createGain()
+      g2.gain.value = 0.6
+
+      const o3 = ctx.createOscillator()
+      o3.type = 'triangle'
+      o3.frequency.value = freq * 2
+      const g3 = ctx.createGain()
+      g3.gain.value = 0.12
+
+      gain.gain.setValueAtTime(0.0001, now)
+      gain.gain.exponentialRampToValueAtTime(0.2, now + 0.05)
+
+      o1.connect(gain)
+      o2.connect(g2).connect(gain)
+      o3.connect(g3).connect(gain)
+      gain.connect(filter).connect(ctx.destination)
+
+      o1.start(now)
+      o2.start(now)
+      o3.start(now)
+
+      voiceRef.current = { ctx, gain, oscs: [o1, o2, o3] }
+    },
+    [audio, release]
+  )
+
+  useEffect(() => () => release(), [release])
+
+  return { play, release }
 }
 
 /* ============================================================
@@ -1811,6 +1909,155 @@ function VoiceKeyboard({ reading, active, state }) {
   )
 }
 
+/* 指板。写真と同じ並びで、上から E → A → D → G */
+function Fingerboard({ a4, sound, setSound, onPress, onRelease, current }) {
+  const COL = 74
+  const ROW = 46
+  const TOP = 30
+  const COLS = FRETS.length
+  const W = COL * COLS
+  const BOARD_H = TOP + ROW * 3 + 26
+  const H = BOARD_H + 62
+
+  const xOf = (c) => COL * c + COL / 2
+  const yOf = (r) => TOP + ROW * r
+
+  /* 指ごとのまとまり（①は2列ぶん、というブラケット） */
+  const groups = []
+  FRETS.forEach((f, i) => {
+    const last = groups[groups.length - 1]
+    if (last && last.finger === f.finger) last.to = i
+    else groups.push({ finger: f.finger, from: i, to: i })
+  })
+
+  return (
+    <div className="fb">
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="fb-svg"
+        role="application"
+        aria-label="バイオリンの指板"
+      >
+        {/* 指板（開放弦の列は板の外＝ナットの手前） */}
+        <rect x={COL} y="0" width={W - COL} height={BOARD_H} rx="6" className="fb-board" />
+        <rect x={COL - 5} y="0" width="7" height={BOARD_H} className="fb-nut" />
+
+        {/* 弦 */}
+        {STRINGS.map((s, r) => (
+          <line
+            key={s.id}
+            x1="6"
+            y1={yOf(r)}
+            x2={W - 6}
+            y2={yOf(r)}
+            className="fb-string"
+            strokeWidth={1 + (3 - r) * 0.7}
+          />
+        ))}
+
+        {/* 押さえる位置 */}
+        {STRINGS.map((s, r) =>
+          FRETS.map((f, c) => {
+            const midi = s.midi + f.offset
+            const pc = ((midi % 12) + 12) % 12
+            const jp = JP_NAMES[pc]
+            const sharp = !!jp.flat
+            const on = current && current.row === r && current.col === c
+            return (
+              <g
+                key={`${s.id}-${c}`}
+                className="fb-dot"
+                data-sharp={sharp}
+                data-on={on}
+                onPointerDown={(e) => {
+                  e.preventDefault()
+                  onPress(r, c)
+                }}
+                onPointerUp={onRelease}
+                onPointerLeave={onRelease}
+                onPointerCancel={onRelease}
+              >
+                <ellipse cx={xOf(c)} cy={yOf(r)} rx="24" ry="16" className="fb-pad" />
+                <text x={xOf(c)} y={yOf(r) + 5} textAnchor="middle" className="fb-text">
+                  {jp.sharp}
+                </text>
+              </g>
+            )
+          })
+        )}
+
+        {/* 指のまとまり */}
+        {groups.map((g) => {
+          const x1 = xOf(g.from) - 26
+          const x2 = xOf(g.to) + 26
+          const y = BOARD_H + 8
+          const f = FINGERS[g.finger]
+          return (
+            <g key={g.finger}>
+              <path
+                d={`M ${x1} ${y + 10} L ${x1} ${y} L ${x2} ${y} L ${x2} ${y + 10}`}
+                className="fb-bracket"
+              />
+              <text x={(x1 + x2) / 2} y={y + 32} textAnchor="middle" className="fb-finger">
+                {f.mark}
+                {f.name}
+              </text>
+            </g>
+          )
+        })}
+      </svg>
+
+      <div className="fb-legend">
+        <span className="fb-strings">
+          {STRINGS.map((s) => (
+            <span key={s.id}>
+              {s.label}線 {midiToFreq(s.midi, a4).toFixed(0)}Hz
+            </span>
+          ))}
+        </span>
+        <button className="mini toggle" data-on={sound} onClick={() => setSound((v) => !v)}>
+          {sound ? '音あり' : '音なし'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/* 押さえた音の表示 */
+function FingerReadout({ current, a4 }) {
+  if (!current) {
+    return (
+      <div className="fr" data-idle="true">
+        <span className="fr-jp">—</span>
+        <span className="fr-msg">指板をタップすると音が鳴ります</span>
+      </div>
+    )
+  }
+  const { midi, row, col } = current
+  const pc = ((midi % 12) + 12) % 12
+  const jp = JP_NAMES[pc]
+  const { octave } = midiToName(midi)
+  const f = FINGERS[FRETS[col].finger]
+  const s = STRINGS[row]
+
+  return (
+    <div className="fr" data-sharp={!!jp.flat}>
+      <span className="fr-jp">
+        {jp.sharp}
+        <span className="fr-oct">{octave}</span>
+      </span>
+      {jp.flat && <span className="fr-alt">＝ {jp.flat}</span>}
+      <span className="fr-meta">
+        {s.label}線（{s.num}）・{f.mark}
+        {f.name}
+      </span>
+      <span className="fr-hz">
+        {midiToLabel(midi)} · {midiToFreq(midi, a4).toFixed(1)} Hz
+      </span>
+    </div>
+  )
+}
+
 function Metronome({ bpm, setBpm, time, setTime, metro, disabled }) {
   const unit = time.beatType === 8 ? '♪' : '♩'
   return (
@@ -2074,6 +2321,8 @@ function Studio() {
   const [freeKey, setFreeKey] = useState(null)
   const [autoStopped, setAutoStopped] = useState(false)
 
+  const [sound, setSound] = useState(true)
+  const [finger, setFinger] = useState(null) // 押さえている位置
   const cards = useDragScroll()
 
   useEffect(() => {
@@ -2102,6 +2351,7 @@ function Studio() {
   const pitch = usePitch(a4, audio, blankRef, detect)
   const metro = useMetronome(audio, bpm, time, blankRef)
   const free = useFreeMode({ audio, pitch, metro, bpm, time, blankRef, keyOverride: freeKey })
+  const synth = useViolinSynth(audio)
 
   const piece = tab === 'free' ? free.piece : song
   const score = useScore(tab === 'tuning' ? null : piece, time, mode)
@@ -2151,8 +2401,25 @@ function Studio() {
     if (next === tab) return
     session.stop()
     if (free.recording) free.stop()
+    synth.release()
+    setFinger(null)
+    // 運指ではマイクを使わないので閉じておく
+    if (next === 'finger' && pitch.running) pitch.stop()
     setTab(next)
   }
+
+  const pressFret = useCallback(
+    (row, col) => {
+      const midi = STRINGS[row].midi + FRETS[col].offset
+      setFinger({ row, col, midi })
+      if (sound) synth.play(midiToFreq(midi, a4))
+    },
+    [a4, sound, synth]
+  )
+
+  const releaseFret = useCallback(() => {
+    synth.release()
+  }, [synth])
 
   /* 外れた音符の上に置く札（練習モードのみ） */
   const [badges, setBadges] = useState([])
@@ -2281,6 +2548,14 @@ function Studio() {
           >
             チューニング
           </button>
+          <button
+            role="tab"
+            aria-selected={tab === 'finger'}
+            data-on={tab === 'finger'}
+            onClick={() => switchTab('finger')}
+          >
+            運指
+          </button>
         </div>
 
         <label className="songs-select">
@@ -2363,8 +2638,28 @@ function Studio() {
         </section>
       )}
 
+      {/* 運指 */}
+      {tab === 'finger' && (
+        <section className="block finger-area">
+          <h2 className="label">運指（第1ポジション）</h2>
+          <FingerReadout current={finger} a4={a4} />
+          <Fingerboard
+            a4={a4}
+            sound={sound}
+            setSound={setSound}
+            onPress={pressFret}
+            onRelease={releaseFret}
+            current={finger}
+          />
+          <p className="hint rotate-hint">
+            押している間だけ音が鳴ります。いちばん左の列は開放弦なので、指では押さえずに弾く音です。
+            白＝そのままの音、<span className="sw-high">桃色＝♯</span>。
+          </p>
+        </section>
+      )}
+
       {/* 真ん中：楽譜 */}
-      {tab !== 'tuning' && (
+      {tab !== 'tuning' && tab !== 'finger' && (
         <section className="block score-area">
           <h2 className="label">{tab === 'free' ? '採譜した楽譜' : '楽譜'}</h2>
 
@@ -2502,6 +2797,7 @@ function Studio() {
       )}
 
       {/* 下（横画面では右）：マイクと音名 */}
+      {tab !== 'finger' && (
       <section className="block readout-block">
         <div className="readout">
           <div className="note">
@@ -2554,6 +2850,7 @@ function Studio() {
           </select>
         </label>
       </section>
+      )}
 
       <footer className="foot">
         <span>データは端末の中だけで処理され、どこにも送信されません。</span>
@@ -2831,6 +3128,87 @@ body {
 }
 .string[data-ok="true"] .string-cents { background: var(--ok); }
 .voice-range { text-align: center; font-size: 11px; color: var(--ink-30); }
+
+/* ---------- 運指 ---------- */
+.fb { display: flex; flex-direction: column; gap: 10px; }
+.fb-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.fb-board { fill: #23201d; }
+.fb-nut { fill: #e8e2d4; }
+.fb-string { stroke: #cfc9bd; }
+.fb-dot { cursor: pointer; }
+.fb-pad {
+  fill: #ffffff;
+  stroke: #d8d8d2;
+  stroke-width: 1;
+  transition: fill .08s;
+}
+.fb-dot[data-sharp="true"] .fb-pad { fill: #f6cfe0; stroke: #e6aec7; }
+.fb-dot[data-on="true"] .fb-pad { fill: var(--accent); stroke: var(--accent); }
+.fb-dot[data-sharp="true"][data-on="true"] .fb-pad { fill: var(--high); stroke: var(--high); }
+.fb-text {
+  font-size: 15px;
+  font-weight: 700;
+  fill: #2a2d38;
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  pointer-events: none;
+}
+.fb-dot[data-on="true"] .fb-text { fill: #fff; }
+.fb-bracket { fill: none; stroke: var(--ink-30); stroke-width: 1.5; }
+.fb-finger {
+  font-size: 15px;
+  font-weight: 700;
+  fill: var(--ink-60);
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+}
+.fb-legend {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.fb-strings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 10.5px;
+  color: var(--ink-30);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 押さえた音の表示 */
+.fr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--paper-2);
+  min-height: 66px;
+}
+.fr-jp {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent);
+}
+.fr[data-sharp="true"] .fr-jp { color: var(--high); }
+.fr[data-idle="true"] .fr-jp { color: var(--ink-30); }
+.fr-oct { font-size: 17px; color: var(--ink-30); margin-left: 2px; }
+.fr-alt { font-size: 12px; color: var(--low); font-weight: 700; }
+.fr-meta { font-size: 12px; color: var(--ink-60); }
+.fr-hz { font-size: 11px; color: var(--ink-30); font-variant-numeric: tabular-nums; }
+.fr-msg { font-size: 12px; color: var(--ink-30); }
 
 /* 鍵盤 */
 .kb { display: flex; flex-direction: column; gap: 10px; }
@@ -3218,6 +3596,23 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
   .string-name { font-size: 16px; }
   .string-sub, .string-hz { font-size: 8.5px; }
   .voice-range { font-size: 9px; }
+
+  .finger-area {
+    grid-column: 1; grid-row: 2 / span 2;
+    min-height: 0; display: flex; flex-direction: column; gap: 4px;
+  }
+  .fb { flex: 1; min-height: 0; gap: 5px; }
+  .fb-svg { flex: 1; min-height: 0; max-height: 100%; width: auto; margin: 0 auto; }
+  .fb-legend { gap: 6px; }
+  .fb-strings { font-size: 9px; gap: 2px 7px; }
+  .fr {
+    padding: 5px 8px; margin-bottom: 0; border-radius: 9px;
+    min-height: 0; gap: 2px 8px;
+  }
+  .fr-jp { font-size: 20px; }
+  .fr-oct { font-size: 12px; }
+  .fr-alt, .fr-meta { font-size: 10px; }
+  .fr-hz, .fr-msg { font-size: 9px; }
   .kb { gap: 5px; flex: 1; min-height: 0; }
   .kb-svg { flex: 1; min-height: 0; max-height: 100%; width: auto; margin: 0 auto; }
   .kb-now { min-height: 26px; }

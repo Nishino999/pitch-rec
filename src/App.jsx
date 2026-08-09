@@ -136,6 +136,16 @@ const FRETS = [
   { offset: 7, finger: 4 },
 ]
 
+/* ある音を第1ポジションのどこで取るか。
+ * 高い弦から順に見て、最初に届いた場所を選ぶ（＝いちばん低い指使い） */
+function fretFor(midi) {
+  for (let row = 0; row < STRINGS.length; row++) {
+    const off = midi - STRINGS[row].midi
+    if (off >= 0 && off <= 7) return { row, col: off, midi }
+  }
+  return null
+}
+
 const FINGERS = [
   { id: 0, mark: '⓪', name: '押さえない', short: '開放' },
   { id: 1, mark: '①', name: '人差し指', short: '人差指' },
@@ -1042,19 +1052,58 @@ const TONE_LOOP_FROM = 1.2
 function useViolinSynth(audio) {
   const voiceRef = useRef(null)
   const cacheRef = useRef({ ctx: null, map: new Map() })
+  const scheduledRef = useRef([])
 
   const bufferFor = useCallback((ctx, freq, key) => {
     if (cacheRef.current.ctx !== ctx) cacheRef.current = { ctx, map: new Map() }
     const hit = cacheRef.current.map.get(key)
     if (hit) return hit
-
     const sr = ctx.sampleRate
     const data = renderBowedString(freq, sr, TONE_SECONDS)
     const buf = ctx.createBuffer(1, data.length, sr)
-    buf.copyToChannel ? buf.copyToChannel(data, 0) : buf.getChannelData(0).set(data)
+    if (buf.copyToChannel) buf.copyToChannel(data, 0)
+    else buf.getChannelData(0).set(data)
     cacheRef.current.map.set(key, buf)
     return buf
   }, [])
+
+  /* 弦の音 → 胴の共鳴 → 出力、という経路を1本組む */
+  const buildChain = useCallback((ctx) => {
+    const env = ctx.createGain()
+    const out = ctx.createGain()
+    out.gain.value = 0.5
+    const dry = ctx.createGain()
+    dry.gain.value = 0.6
+    env.connect(dry).connect(out)
+    BODY_RESONANCE.forEach(([f, q, g]) => {
+      const bp = ctx.createBiquadFilter()
+      bp.type = 'bandpass'
+      bp.frequency.value = f
+      bp.Q.value = q
+      const bg = ctx.createGain()
+      bg.gain.value = g
+      env.connect(bp).connect(bg).connect(out)
+    })
+    out.connect(ctx.destination)
+    return env
+  }, [])
+
+  /* 押し続けている間の長さに耐えるよう、安定区間を周期の整数倍でつなぐ */
+  const makeSource = useCallback(
+    (ctx, buf, freq) => {
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      const period = ctx.sampleRate / freq
+      const from = Math.floor(ctx.sampleRate * TONE_LOOP_FROM)
+      const room = buf.length - from - 8
+      const cycles = Math.max(1, Math.floor(room / period))
+      src.loop = true
+      src.loopStart = from / ctx.sampleRate
+      src.loopEnd = (from + Math.round(cycles * period)) / ctx.sampleRate
+      return src
+    },
+    []
+  )
 
   const release = useCallback(() => {
     const v = voiceRef.current
@@ -1078,53 +1127,177 @@ function useViolinSynth(audio) {
       const ctx = await audio.ensure()
       release()
       const now = ctx.currentTime
-      const sr = ctx.sampleRate
       const buf = bufferFor(ctx, freq, key ?? Math.round(freq * 10))
-
-      const src = ctx.createBufferSource()
-      src.buffer = buf
-      // 押し続けたときのために、音が安定した区間を周期の整数倍でつなぐ
-      const period = sr / freq
-      const from = Math.floor(sr * TONE_LOOP_FROM)
-      const room = buf.length - from - 8
-      const cycles = Math.max(1, Math.floor(room / period))
-      src.loop = true
-      src.loopStart = from / sr
-      src.loopEnd = (from + Math.round(cycles * period)) / sr
-
-      const env = ctx.createGain()
-      const out = ctx.createGain()
-      out.gain.value = 0.5
-
-      const dry = ctx.createGain()
-      dry.gain.value = 0.6
-      env.connect(dry).connect(out)
-      BODY_RESONANCE.forEach(([f, q, g]) => {
-        const bp = ctx.createBiquadFilter()
-        bp.type = 'bandpass'
-        bp.frequency.value = f
-        bp.Q.value = q
-        const bg = ctx.createGain()
-        bg.gain.value = g
-        env.connect(bp).connect(bg).connect(out)
-      })
-
+      const src = makeSource(ctx, buf, freq)
+      const env = buildChain(ctx)
       src.connect(env)
-      out.connect(ctx.destination)
-
-      // 立ち上がりはモデル側が持っているので、ここは繋ぎ目を消すだけ
       env.gain.setValueAtTime(0.0001, now)
       env.gain.exponentialRampToValueAtTime(0.9, now + 0.012)
       src.start(now)
-
       voiceRef.current = { ctx, env, src }
     },
-    [audio, bufferFor, release]
+    [audio, buildChain, bufferFor, makeSource, release]
   )
 
-  useEffect(() => () => release(), [release])
+  /* お手本再生用。鳴らす時刻をあらかじめ予約するので、
+   * 画面の描画がつまづいてもリズムはずれない */
+  const playAt = useCallback(
+    (ctx, freq, key, when, dur) => {
+      const buf = bufferFor(ctx, freq, key)
+      const src = makeSource(ctx, buf, freq)
+      const env = buildChain(ctx)
+      src.connect(env)
+      const rel = Math.min(0.14, dur * 0.35)
+      env.gain.setValueAtTime(0.0001, when)
+      env.gain.exponentialRampToValueAtTime(0.9, when + 0.012)
+      env.gain.setValueAtTime(0.9, when + Math.max(0.02, dur - rel))
+      env.gain.exponentialRampToValueAtTime(0.0001, when + dur)
+      src.start(when)
+      src.stop(when + dur + 0.05)
+      scheduledRef.current.push({ src, env })
+      return src
+    },
+    [buildChain, bufferFor, makeSource]
+  )
 
-  return { play, release }
+  const stopScheduled = useCallback(() => {
+    const list = scheduledRef.current
+    scheduledRef.current = []
+    list.forEach(({ src, env }) => {
+      try {
+        const ctx = env.context
+        const now = ctx.currentTime
+        env.gain.cancelScheduledValues(now)
+        env.gain.setValueAtTime(Math.max(env.gain.value, 0.0001), now)
+        env.gain.exponentialRampToValueAtTime(0.0001, now + 0.08)
+        src.stop(now + 0.12)
+      } catch {
+        /* すでに終わっていれば何もしない */
+      }
+    })
+  }, [])
+
+  /* 使う音を先に作っておく。1音 20ms ほどかかるので少しずつ進める */
+  const prepare = useCallback(
+    async (ctx, list) => {
+      for (const { freq, key } of list) {
+        bufferFor(ctx, freq, key)
+        await new Promise((r) => setTimeout(r, 0))
+      }
+    },
+    [bufferFor]
+  )
+
+  useEffect(
+    () => () => {
+      release()
+      stopScheduled()
+    },
+    [release, stopScheduled]
+  )
+
+  return { play, release, playAt, stopScheduled, prepare }
+}
+
+/* ============================================================
+ *  お手本再生（音ゲー式）
+ *  曲の音を順に鳴らしながら、押さえる場所を光らせる。
+ *  音は AudioContext の時計に予約済みなので、光る方だけを毎フレーム追う。
+ * ============================================================ */
+function useFingerDemo({ audio, synth, a4, sound }) {
+  const [songId, setSongId] = useState(null)
+  const [status, setStatus] = useState('idle') // idle | loading | playing
+  const [pos, setPos] = useState({ index: -1, current: null, next: null })
+
+  const planRef = useRef([])
+  const startAtRef = useRef(0)
+  const rafRef = useRef(null)
+  const idxRef = useRef(-1)
+
+  const stop = useCallback(() => {
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
+    synth.stopScheduled()
+    idxRef.current = -1
+    setPos({ index: -1, current: null, next: null })
+    setStatus('idle')
+    setSongId(null)
+  }, [synth])
+
+  const loop = useCallback(() => {
+    rafRef.current = requestAnimationFrame(loop)
+    const ctx = audio.ctxRef.current
+    if (!ctx || ctx.state === 'closed') {
+      stop()
+      return
+    }
+    const plan = planRef.current
+    const t = ctx.currentTime - startAtRef.current
+
+    let i = -1
+    for (let k = 0; k < plan.length; k++) {
+      if (t >= plan[k].at) i = k
+      else break
+    }
+    if (i !== idxRef.current) {
+      idxRef.current = i
+      setPos({
+        index: i,
+        current: i >= 0 ? plan[i].fret : null,
+        next: plan[i + 1] ? plan[i + 1].fret : null,
+      })
+    }
+    const last = plan[plan.length - 1]
+    if (last && t > last.at + last.dur + 0.3) stop()
+  }, [audio.ctxRef, stop])
+
+  const start = useCallback(
+    async (song) => {
+      stop()
+      setSongId(song.id)
+      setStatus('loading')
+
+      const ctx = await audio.ensure()
+      const spb = 60 / song.bpm
+
+      const plan = []
+      let at = 0
+      for (const n of song.notes) {
+        const midi = noteToMidi(n.n)
+        const fret = fretFor(midi)
+        const dur = n.d * spb
+        if (fret) plan.push({ midi, fret, at, dur: dur * 0.95, freq: midiToFreq(midi, a4) })
+        at += dur
+      }
+      planRef.current = plan
+
+      // 使う音を先に用意する
+      const uniq = new Map()
+      plan.forEach((p) => uniq.set(`${p.midi}:${a4}`, p.freq))
+      await synth.prepare(
+        ctx,
+        [...uniq].map(([key, freq]) => ({ key, freq }))
+      )
+
+      const lead = 0.35
+      const t0 = ctx.currentTime + lead
+      startAtRef.current = t0
+      if (sound) {
+        plan.forEach((p) => synth.playAt(ctx, p.freq, `${p.midi}:${a4}`, t0 + p.at, p.dur))
+      }
+
+      idxRef.current = -1
+      setPos({ index: -1, current: null, next: plan[0]?.fret ?? null })
+      setStatus('playing')
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = requestAnimationFrame(loop)
+    },
+    [a4, audio, loop, sound, stop, synth]
+  )
+
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
+
+  return { songId, status, pos, start, stop }
 }
 
 /* ============================================================
@@ -2198,7 +2371,7 @@ function fbLayout(vertical) {
   }
 }
 
-function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, immersive, vertical }) {
+function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, next, immersive, vertical }) {
   const L = useMemo(() => fbLayout(vertical), [vertical])
   const px = (r, c) => (L.vertical ? L.x(r) : L.x(r, c))
   const py = (r, c) => (L.vertical ? L.y(c) : L.y(c, r))
@@ -2240,6 +2413,7 @@ function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, immersi
             const pc = ((midi % 12) + 12) % 12
             const jp = JP_NAMES[pc]
             const on = current && current.row === r && current.col === c
+            const soon = !on && next && next.row === r && next.col === c
             const cx = px(r, c)
             const cy = py(r, c)
             return (
@@ -2248,6 +2422,7 @@ function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, immersi
                 className="fb-dot"
                 data-sharp={!!jp.flat}
                 data-on={on}
+                data-next={soon}
                 onPointerDown={(e) => {
                   e.preventDefault()
                   onPress(r, c)
@@ -2650,6 +2825,7 @@ function Studio() {
   const free = useFreeMode({ audio, pitch, metro, bpm, time, blankRef, keyOverride: freeKey })
   const synth = useViolinSynth(audio)
   const immersive = useImmersive()
+  const demo = useFingerDemo({ audio, synth, a4, sound })
 
   const piece = tab === 'free' ? free.piece : song
   const score = useScore(tab === 'tuning' ? null : piece, time, mode)
@@ -2700,6 +2876,7 @@ function Studio() {
     session.stop()
     if (free.recording) free.stop()
     synth.release()
+    demo.stop()
     setFinger(null)
     if (immersive.on) immersive.exit()
     // 運指ではマイクを使わないので閉じておく
@@ -2711,11 +2888,12 @@ function Studio() {
 
   const pressFret = useCallback(
     (row, col) => {
+      demo.stop()
       const midi = STRINGS[row].midi + FRETS[col].offset
       setFinger({ row, col, midi })
       if (sound) synth.play(midiToFreq(midi, a4), `${midi}:${a4}`)
     },
-    [a4, sound, synth]
+    [a4, demo, sound, synth]
   )
 
   const releaseFret = useCallback(() => {
@@ -2780,6 +2958,8 @@ function Studio() {
       session.begin()
     }
   }
+
+  const shownFret = demo.status === 'playing' ? demo.pos.current ?? null : finger
 
   const micPhase =
     tab === 'tuning'
@@ -2951,14 +3131,36 @@ function Studio() {
             </button>
           )}
 
-          <FingerReadout current={finger} a4={a4} />
+          <div className="demo-row">
+            <span className="demo-label">お手本</span>
+            <span className="demo-songs">
+              {SONGS.map((sg) => (
+                <button
+                  key={sg.id}
+                  className="mini"
+                  data-on={demo.songId === sg.id}
+                  onClick={() => (demo.songId === sg.id ? demo.stop() : demo.start(sg))}
+                >
+                  {sg.title}
+                </button>
+              ))}
+            </span>
+            {demo.status !== 'idle' && (
+              <button className="mini stop" onClick={demo.stop}>
+                {demo.status === 'loading' ? '準備中…' : '停止'}
+              </button>
+            )}
+          </div>
+
+          <FingerReadout current={shownFret} a4={a4} />
           <Fingerboard
             a4={a4}
             sound={sound}
             setSound={setSound}
             onPress={pressFret}
             onRelease={releaseFret}
-            current={finger}
+            current={shownFret}
+            next={demo.pos.next}
             immersive={immersive}
             vertical={immersive.on}
           />
@@ -3523,6 +3725,50 @@ body {
 .fr-msg { font-size: 12px; color: var(--ink-30); }
 .fb-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
+/* 次に押さえる場所を薄く光らせる（音ゲー式の予告） */
+.fb-dot[data-next="true"] .fb-pad {
+  fill: #c9d0ee;
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.fb-dot[data-sharp="true"][data-next="true"] .fb-pad { fill: #f2c7d8; stroke: var(--high); }
+.fb-dot[data-next="true"] .fb-text { fill: var(--accent); }
+
+/* お手本の選択 */
+.demo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.demo-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  color: var(--ink-60);
+  flex-shrink: 0;
+}
+.demo-songs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 1;
+  min-width: 0;
+}
+.demo-songs::-webkit-scrollbar { display: none; }
+.demo-songs .mini { flex-shrink: 0; }
+.demo-songs .mini[data-on="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.demo-row .stop {
+  flex-shrink: 0;
+  color: var(--high);
+  border-color: #f0d5d3;
+}
+
 /* ---------- 全画面（没入モード） ---------- */
 .exit-full {
   position: fixed;
@@ -3719,6 +3965,9 @@ body {
 }
 .app[data-immersive="true"] .fb-legend { flex: 0 0 auto; }
 .app[data-immersive="true"] .fb-strings { font-size: 10px; }
+.app[data-immersive="true"] .demo-row { margin-bottom: 0; flex: 0 0 auto; gap: 6px; }
+.app[data-immersive="true"] .demo-label { display: none; }
+.app[data-immersive="true"] .demo-row .mini { padding: 6px 9px; font-size: 11px; }
 
 /* 端末が横を向いても、中身を回して縦のまま見せる */
 .app[data-rotate="true"] .finger-area {

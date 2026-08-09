@@ -233,6 +233,233 @@ const SONGS = [
       { n: 'G5', d: 1 }, { n: 'G4', d: 1 }, { n: 'G4', d: 1 },
     ],
   },
+
+  /* ---------- 追加のデモ曲（いずれもパブリックドメイン） ---------- */
+  {
+    id: 'lightlyrow',
+    title: 'ちょうちょう',
+    subtitle: 'ドイツ民謡 / Lightly Row',
+    keyName: 'イ長調',
+    fifths: 3,
+    time: { beats: 4, beatType: 4 },
+    pickup: 0,
+    bpm: 92,
+    level: '入門',
+    note: '同じ形が繰り返される。A線とE線だけで弾ける。',
+    notes: [
+      { n: 'E5', d: 1 }, { n: 'C#5', d: 1 }, { n: 'C#5', d: 2 },
+      { n: 'D5', d: 1 }, { n: 'B4', d: 1 }, { n: 'B4', d: 2 },
+      { n: 'A4', d: 1 }, { n: 'B4', d: 1 }, { n: 'C#5', d: 1 }, { n: 'D5', d: 1 },
+      { n: 'E5', d: 1 }, { n: 'E5', d: 1 }, { n: 'E5', d: 2 },
+      { n: 'E5', d: 1 }, { n: 'C#5', d: 1 }, { n: 'C#5', d: 2 },
+      { n: 'D5', d: 1 }, { n: 'B4', d: 1 }, { n: 'B4', d: 2 },
+      { n: 'A4', d: 1 }, { n: 'C#5', d: 1 }, { n: 'E5', d: 1 }, { n: 'E5', d: 1 },
+      { n: 'C#5', d: 1 }, { n: 'A4', d: 1 }, { n: 'A4', d: 2 },
+    ],
+  },
+  {
+    id: 'mary',
+    title: 'メリーさんのひつじ',
+    subtitle: 'アメリカ童謡',
+    keyName: 'ニ長調',
+    fifths: 2,
+    time: { beats: 4, beatType: 4 },
+    pickup: 0,
+    bpm: 96,
+    level: '入門',
+    note: 'D線だけでほぼ弾ける。指の並びを覚えるのに最適。',
+    notes: [
+      { n: 'F#4', d: 1 }, { n: 'E4', d: 1 }, { n: 'D4', d: 1 }, { n: 'E4', d: 1 },
+      { n: 'F#4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'F#4', d: 2 },
+      { n: 'E4', d: 1 }, { n: 'E4', d: 1 }, { n: 'E4', d: 2 },
+      { n: 'F#4', d: 1 }, { n: 'A4', d: 1 }, { n: 'A4', d: 2 },
+      { n: 'F#4', d: 1 }, { n: 'E4', d: 1 }, { n: 'D4', d: 1 }, { n: 'E4', d: 1 },
+      { n: 'F#4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'F#4', d: 1 },
+      { n: 'E4', d: 1 }, { n: 'E4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'E4', d: 1 },
+      { n: 'D4', d: 4 },
+    ],
+  },
+  {
+    id: 'frog',
+    title: 'かえるの合唱',
+    subtitle: 'ドイツ民謡',
+    keyName: 'ト長調',
+    fifths: 1,
+    time: { beats: 4, beatType: 4 },
+    pickup: 0,
+    bpm: 104,
+    level: '入門',
+    note: '順に上がって下りるだけ。八分音符の練習にもなる。',
+    notes: [
+      { n: 'G4', d: 1 }, { n: 'A4', d: 1 }, { n: 'B4', d: 1 }, { n: 'C5', d: 1 },
+      { n: 'B4', d: 1 }, { n: 'A4', d: 1 }, { n: 'G4', d: 2 },
+      { n: 'B4', d: 1 }, { n: 'C5', d: 1 }, { n: 'D5', d: 1 }, { n: 'E5', d: 1 },
+      { n: 'D5', d: 1 }, { n: 'C5', d: 1 }, { n: 'B4', d: 2 },
+      { n: 'G4', d: 2 }, { n: 'G4', d: 2 },
+      { n: 'G4', d: 0.5 }, { n: 'G4', d: 0.5 }, { n: 'A4', d: 0.5 }, { n: 'A4', d: 0.5 },
+      { n: 'B4', d: 0.5 }, { n: 'B4', d: 0.5 }, { n: 'C5', d: 0.5 }, { n: 'C5', d: 0.5 },
+      { n: 'B4', d: 1 }, { n: 'A4', d: 1 }, { n: 'G4', d: 2 },
+    ],
+  },
+  {
+    id: 'londonbridge',
+    title: 'ロンドン橋',
+    subtitle: 'イギリス童謡',
+    keyName: 'ニ長調',
+    fifths: 2,
+    time: { beats: 4, beatType: 4 },
+    pickup: 0,
+    bpm: 100,
+    level: '入門',
+    note: '隣り合う音の行き来が多く、指の移動が小さい。',
+    notes: [
+      { n: 'A4', d: 1 }, { n: 'B4', d: 1 }, { n: 'A4', d: 1 }, { n: 'G4', d: 1 },
+      { n: 'F#4', d: 1 }, { n: 'G4', d: 1 }, { n: 'A4', d: 2 },
+      { n: 'E4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'G4', d: 2 },
+      { n: 'F#4', d: 1 }, { n: 'G4', d: 1 }, { n: 'A4', d: 2 },
+      { n: 'A4', d: 1 }, { n: 'B4', d: 1 }, { n: 'A4', d: 1 }, { n: 'G4', d: 1 },
+      { n: 'F#4', d: 1 }, { n: 'G4', d: 1 }, { n: 'A4', d: 2 },
+      { n: 'E4', d: 2 }, { n: 'A4', d: 1 }, { n: 'F#4', d: 1 },
+      { n: 'D4', d: 4 },
+    ],
+  },
+  {
+    id: 'longlongago',
+    title: 'ロング・ロング・アゴー',
+    subtitle: 'T.H.ベイリー / 1833年',
+    keyName: 'ニ長調',
+    fifths: 2,
+    time: { beats: 4, beatType: 4 },
+    pickup: 0,
+    bpm: 84,
+    level: '初級',
+    note: '鈴木教本でおなじみ。息の長い旋律で弓の配分を覚える。',
+    notes: [
+      { n: 'A4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'G4', d: 1 }, { n: 'A4', d: 1 },
+      { n: 'D5', d: 2 }, { n: 'D5', d: 1 }, { n: 'C#5', d: 1 },
+      { n: 'B4', d: 1 }, { n: 'A4', d: 1 }, { n: 'B4', d: 1 }, { n: 'C#5', d: 1 },
+      { n: 'D5', d: 4 },
+      { n: 'A4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'G4', d: 1 }, { n: 'A4', d: 1 },
+      { n: 'D5', d: 2 }, { n: 'D5', d: 1 }, { n: 'C#5', d: 1 },
+      { n: 'B4', d: 1 }, { n: 'A4', d: 1 }, { n: 'G4', d: 1 }, { n: 'F#4', d: 1 },
+      { n: 'E4', d: 4 },
+    ],
+  },
+  {
+    id: 'saints',
+    title: '聖者の行進',
+    subtitle: 'アメリカ黒人霊歌',
+    keyName: 'ニ長調',
+    fifths: 2,
+    time: { beats: 4, beatType: 4 },
+    pickup: 3,
+    bpm: 108,
+    level: '初級',
+    note: '3拍の弱起から始まる。拍の頭を意識する練習に。',
+    notes: [
+      { n: 'D4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'G4', d: 1 },
+      { n: 'A4', d: 4 },
+      { n: 'D4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'G4', d: 1 }, { n: 'A4', d: 1 },
+      { n: 'A4', d: 2 }, { n: 'F#4', d: 1 }, { n: 'D4', d: 1 },
+      { n: 'F#4', d: 2 }, { n: 'E4', d: 2 },
+      { n: 'D4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'E4', d: 1 },
+      { n: 'D4', d: 2 }, { n: 'D4', d: 1 }, { n: 'F#4', d: 1 },
+      { n: 'A4', d: 2 }, { n: 'G4', d: 2 },
+      { n: 'F#4', d: 2 }, { n: 'D4', d: 1 }, { n: 'E4', d: 1 },
+      { n: 'D4', d: 4 },
+    ],
+  },
+  {
+    id: 'jingle',
+    title: 'ジングルベル',
+    subtitle: 'J.ピアポント / 1857年',
+    keyName: 'ニ長調',
+    fifths: 2,
+    time: { beats: 4, beatType: 4 },
+    pickup: 0,
+    bpm: 116,
+    level: '初級',
+    note: '同じ音の連打が多い。弓を細かく返す練習になる。',
+    notes: [
+      { n: 'F#4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'F#4', d: 2 },
+      { n: 'F#4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'F#4', d: 2 },
+      { n: 'F#4', d: 1 }, { n: 'A4', d: 1 }, { n: 'D4', d: 1 }, { n: 'E4', d: 1 },
+      { n: 'F#4', d: 4 },
+      { n: 'G4', d: 1 }, { n: 'G4', d: 1 }, { n: 'G4', d: 1 }, { n: 'G4', d: 1 },
+      { n: 'G4', d: 1 }, { n: 'F#4', d: 1 }, { n: 'F#4', d: 1 },
+      { n: 'F#4', d: 0.5 }, { n: 'F#4', d: 0.5 },
+      { n: 'F#4', d: 1 }, { n: 'E4', d: 1 }, { n: 'E4', d: 1 }, { n: 'F#4', d: 1 },
+      { n: 'E4', d: 2 }, { n: 'A4', d: 2 },
+    ],
+  },
+  {
+    id: 'auldlang',
+    title: '蛍の光',
+    subtitle: 'スコットランド民謡 / Auld Lang Syne',
+    keyName: 'ト長調',
+    fifths: 1,
+    time: { beats: 4, beatType: 4 },
+    pickup: 1,
+    bpm: 76,
+    level: '初級',
+    note: '付点のリズムが要。弱起で始まる。',
+    notes: [
+      { n: 'D4', d: 1 },
+      { n: 'G4', d: 1.5 }, { n: 'F#4', d: 0.5 }, { n: 'G4', d: 1 }, { n: 'B4', d: 1 },
+      { n: 'A4', d: 3 }, { n: 'A4', d: 1 },
+      { n: 'B4', d: 1.5 }, { n: 'A4', d: 0.5 }, { n: 'G4', d: 1 }, { n: 'B4', d: 1 },
+      { n: 'D5', d: 3 }, { n: 'E5', d: 1 },
+      { n: 'E5', d: 1.5 }, { n: 'D5', d: 0.5 }, { n: 'B4', d: 1 }, { n: 'G4', d: 1 },
+      { n: 'A4', d: 3 }, { n: 'G4', d: 1 },
+      { n: 'A4', d: 1.5 }, { n: 'B4', d: 0.5 }, { n: 'G4', d: 1 }, { n: 'E4', d: 1 },
+      { n: 'D4', d: 2 }, { n: 'G4', d: 2 },
+    ],
+  },
+  {
+    id: 'largo',
+    title: '家路',
+    subtitle: 'ドヴォルザーク 交響曲第9番「新世界より」',
+    keyName: 'ト長調',
+    fifths: 1,
+    time: { beats: 4, beatType: 4 },
+    pickup: 0,
+    bpm: 60,
+    level: '初中級',
+    note: '遅い曲。伸ばす音が長く、音程の粗が出やすい。',
+    notes: [
+      { n: 'B4', d: 1.5 }, { n: 'D5', d: 0.5 }, { n: 'D5', d: 2 },
+      { n: 'B4', d: 1 }, { n: 'A4', d: 1 }, { n: 'G4', d: 2 },
+      { n: 'A4', d: 1 }, { n: 'B4', d: 1 }, { n: 'D5', d: 1 }, { n: 'B4', d: 1 },
+      { n: 'A4', d: 4 },
+      { n: 'B4', d: 1.5 }, { n: 'D5', d: 0.5 }, { n: 'D5', d: 2 },
+      { n: 'B4', d: 1 }, { n: 'A4', d: 1 }, { n: 'G4', d: 2 },
+      { n: 'A4', d: 1 }, { n: 'B4', d: 1 }, { n: 'A4', d: 1 }, { n: 'G4', d: 1 },
+      { n: 'G4', d: 4 },
+    ],
+  },
+  {
+    id: 'greensleeves',
+    title: 'グリーンスリーブス',
+    subtitle: 'イングランド民謡 / 16世紀',
+    keyName: 'イ短調',
+    fifths: 0,
+    time: { beats: 3, beatType: 4 },
+    pickup: 1,
+    bpm: 92,
+    level: '中級',
+    note: '短調で臨時記号あり。3拍子と弱起の両方が入る。',
+    notes: [
+      { n: 'A4', d: 1 },
+      { n: 'C5', d: 2 }, { n: 'D5', d: 1 },
+      { n: 'E5', d: 1.5 }, { n: 'F5', d: 0.5 }, { n: 'E5', d: 1 },
+      { n: 'D5', d: 2 }, { n: 'B4', d: 1 },
+      { n: 'G4', d: 1.5 }, { n: 'A4', d: 0.5 }, { n: 'B4', d: 1 },
+      { n: 'C5', d: 2 }, { n: 'A4', d: 1 },
+      { n: 'A4', d: 1.5 }, { n: 'G#4', d: 0.5 }, { n: 'A4', d: 1 },
+      { n: 'B4', d: 2 }, { n: 'G#4', d: 1 },
+      { n: 'E4', d: 3 },
+    ],
+  },
 ]
 
 const TIME_OPTIONS = [
@@ -673,6 +900,101 @@ function useDragScroll() {
   }, [])
 
   return { ref, edges, nudge, revealChild }
+}
+
+/* ============================================================
+ *  演奏の講評
+ *  点数だけ出しても伸びないので、「何が起きていたか」を1〜2点に絞って言う。
+ *  褒めるところは褒め、直すところは具体的な場所で示す。
+ * ============================================================ */
+const RANKS = [
+  { min: 100, badge: 'S', headline: 'エクセレント！', tone: 'ok' },
+  { min: 92, badge: 'A', headline: '見事です', tone: 'ok' },
+  { min: 80, badge: 'B', headline: 'その調子、良い感じ', tone: 'ok' },
+  { min: 65, badge: 'C', headline: 'あと少し', tone: 'warn' },
+  { min: 45, badge: 'D', headline: '形は見えています', tone: 'warn' },
+  { min: 0, badge: 'E', headline: 'ゆっくりから、もう一度', tone: 'warn' },
+]
+
+/* 合格した音の割合を軸にする。惜しい音には部分点を少しだけ。
+ * 「8割の音が合格 ≒ 80点台」になるよう配点している。 */
+function scoreOf(v) {
+  if (!v || v.verdict === 'missed') return 0
+  if (v.verdict === 'ok') return 1
+  if (v.semis) return 0.05 // 別の音を弾いている
+  return Math.abs(v.cents) <= 30 ? 0.45 : 0.2 // 音名は合っているが甘い
+}
+
+function buildReview(verdicts, song) {
+  const done = verdicts.filter(Boolean)
+  if (!done.length) return null
+
+  const total = done.length
+  const okCount = done.filter((v) => v.verdict === 'ok').length
+  const missed = done.filter((v) => v.verdict === 'missed').length
+  const wrong = done.filter((v) => v.semis).length
+  const score = Math.round((done.reduce((a, v) => a + scoreOf(v), 0) / total) * 100)
+  const rank = RANKS.find((r) => score >= r.min)
+
+  const tuned = done.filter((v) => v.verdict !== 'missed' && !v.semis && v.cents != null)
+  const avg = tuned.length ? Math.round(tuned.reduce((a, v) => a + v.cents, 0) / tuned.length) : null
+  const spread = tuned.length
+    ? Math.round(Math.sqrt(tuned.reduce((a, v) => a + (v.cents - avg) ** 2, 0) / tuned.length))
+    : null
+
+  /* どの音で外しているかを数える */
+  const byName = new Map()
+  done.forEach((v, i) => {
+    if (v.verdict === 'ok' || v.verdict === 'missed') return
+    const name = song.notes[i]?.n
+    if (!name) return
+    byName.set(name, (byName.get(name) ?? 0) + 1)
+  })
+  const worst = [...byName.entries()].sort((a, b) => b[1] - a[1])[0]
+
+  const missCount = total - okCount
+  const points = []
+
+  if (okCount === total) {
+    points.push('全部の音が合格。音程も安定しています。')
+  } else {
+    if (missCount <= 2 && !missed && !wrong) {
+      points.push(`惜しかったのは ${missCount} 音だけ。あと少しで全部そろいます。`)
+    }
+    if (avg != null && Math.abs(avg) > 12) {
+      points.push(
+        `全体に${avg > 0 ? '高め' : '低め'}（平均 ${avg > 0 ? '+' : ''}${avg} cent）。指の位置を${
+          avg > 0 ? '少し手前に' : '少し先に'
+        }。`
+      )
+    } else if (spread != null && spread > 20) {
+      points.push(`平均は合っていますが、音ごとのばらつきが大きめ（±${spread} cent）。`)
+    }
+    // 外している音が一部に偏っているときだけ、その音を名指しする
+    if (worst && worst[1] >= 2 && missCount <= total * 0.6) {
+      const f = fretFor(noteToMidi(worst[0]))
+      const place = f
+        ? `${STRINGS[f.row].label}線の${FINGERS[FRETS[f.col].finger].mark}${FINGERS[FRETS[f.col].finger].name}`
+        : ''
+      points.push(`${worst[0]} が ${worst[1]} 回外れています${place ? `（${place}）` : ''}。`)
+    }
+    if (wrong > 0) points.push(`別の音を弾いた箇所が ${wrong} か所。運指を確認しましょう。`)
+    if (missed > 0)
+      points.push(`音が拾えなかった箇所が ${missed} か所。もう少し強く弾くか、テンポを落として。`)
+  }
+
+  if (!points.length) points.push('大きな崩れはありません。このテンポで通せています。')
+
+  return {
+    score,
+    rank,
+    total,
+    okCount,
+    missed,
+    wrong,
+    avg,
+    points: points.slice(0, 3),
+  }
 }
 
 /* ============================================================
@@ -1861,16 +2183,9 @@ function useSession({ song, bpm, time, startMode, audio, pitch, score, metro }) 
     setVerdicts([])
   }, [song, bpm, time])
 
-  const summary = useMemo(() => {
-    const done = verdicts.filter(Boolean)
-    if (!done.length) return null
-    const ok = done.filter((v) => v.verdict === 'ok').length
-    const tuned = done.filter((v) => v.verdict !== 'missed' && !v.semis)
-    const avg = tuned.length ? Math.round(tuned.reduce((a, b) => a + b.cents, 0) / tuned.length) : null
-    return { ok, total: done.length, avg }
-  }, [verdicts])
+  const review = useMemo(() => buildReview(verdicts, song), [verdicts, song])
 
-  return { phase, index, verdicts, countBeat, summary, begin, reset, stop: () => stopSession('idle') }
+  return { phase, index, verdicts, countBeat, review, begin, reset, stop: () => stopSession('idle') }
 }
 
 /* ============================================================
@@ -3275,18 +3590,30 @@ function Studio() {
             </div>
           )}
 
-          {tab === 'practice' && session.summary && session.phase === 'done' && (
-            <p className="summary">
-              {session.summary.total} 音中 <b>{session.summary.ok}</b> 音が合格
-              {session.summary.avg != null && (
-                <>
-                  {' '}／ 平均 {session.summary.avg > 0 ? '+' : ''}
-                  {session.summary.avg} cent
-                  {Math.abs(session.summary.avg) > GOOD_CENTS &&
-                    `（全体に${session.summary.avg > 0 ? '高め' : '低め'}）`}
-                </>
-              )}
-            </p>
+          {tab === 'practice' && session.review && session.phase === 'done' && (
+            <div className="review" data-tone={session.review.rank.tone}>
+              <div className="review-head">
+                <span className="review-badge">{session.review.rank.badge}</span>
+                <span className="review-main">
+                  <span className="review-headline">{session.review.rank.headline}</span>
+                  <span className="review-score">
+                    {session.review.score}
+                    <em>点</em>
+                    <span className="review-count">
+                      {session.review.total} 音中 {session.review.okCount} 音が合格
+                    </span>
+                  </span>
+                </span>
+              </div>
+              <div className="review-bar">
+                <span style={{ width: `${session.review.score}%` }} />
+              </div>
+              <ul className="review-points">
+                {session.review.points.map((t, i) => (
+                  <li key={i}>{t}</li>
+                ))}
+              </ul>
+            </div>
           )}
 
           <p className="hint rotate-hint">
@@ -3873,7 +4200,11 @@ body {
   .score-controls { margin-top: 6px; gap: 6px; }
   .score-controls .mini { padding: 5px 8px; font-size: 11px; }
   .score-count { font-size: 11px; padding: 0 8px; }
-  .summary { margin-top: 6px; padding: 6px 8px; font-size: 11px; }
+  .review { margin-top: 6px; padding: 8px 10px; border-radius: 10px; }
+  .review-badge { width: 30px; height: 30px; font-size: 15px; }
+  .review-headline { font-size: 12px; }
+  .review-score { font-size: 15px; }
+  .review-points { font-size: 10px; margin-top: 6px; }
 
   /* チューニングは左を全部使う */
   .tuning-area {

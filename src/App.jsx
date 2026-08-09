@@ -137,11 +137,11 @@ const FRETS = [
 ]
 
 const FINGERS = [
-  { id: 0, mark: '⓪', name: '押さえない' },
-  { id: 1, mark: '①', name: '人差し指' },
-  { id: 2, mark: '②', name: '中指' },
-  { id: 3, mark: '③', name: '薬指' },
-  { id: 4, mark: '④', name: '小指' },
+  { id: 0, mark: '⓪', name: '押さえない', short: '開放' },
+  { id: 1, mark: '①', name: '人差し指', short: '人差指' },
+  { id: 2, mark: '②', name: '中指', short: '中指' },
+  { id: 3, mark: '③', name: '薬指', short: '薬指' },
+  { id: 4, mark: '④', name: '小指', short: '小指' },
 ]
 
 /* ---------- デモ曲（すべてパブリックドメイン） ---------- */
@@ -2134,20 +2134,75 @@ function VoiceKeyboard({ reading, active, state }) {
   )
 }
 
-/* 指板。写真と同じ並びで、上から E → A → D → G */
-function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, immersive }) {
+/* ============================================================
+ *  指板
+ *  横向き … 写真と同じ並び（左から開放弦、上から E→A→D→G）
+ *  縦向き … 実際に構えて上から覗いた向き。弦が縦に走り、
+ *           左から G→D→A→E、上から下へポジションが進む。
+ *           縦長の画面ではこちらの方が桁違いに大きく置ける。
+ * ============================================================ */
+function fbLayout(vertical) {
+  if (vertical) {
+    const COLW = 104
+    const ROWH = 100
+    const GUT = 58 // 指の名前を縦書きする余白
+    const boardW = COLW * STRINGS.length
+    const W = boardW + GUT
+    const H = ROWH * FRETS.length
+    return {
+      vertical: true,
+      W,
+      H,
+      boardW,
+      /* 弦は左から G→D→A→E（STRINGS は E→A→D→G なので逆順） */
+      x: (r) => COLW * (STRINGS.length - 1 - r) + COLW / 2,
+      y: (c) => ROWH * c + ROWH / 2,
+      rx: 44,
+      ry: 32,
+      font: 27,
+      board: { x: 0, y: ROWH, w: boardW, h: H - ROWH },
+      nut: { x: 0, y: ROWH - 6, w: boardW, h: 8 },
+      stringLine: (r) => ({ x1: COLW * (STRINGS.length - 1 - r) + COLW / 2, y1: 8, x2: COLW * (STRINGS.length - 1 - r) + COLW / 2, y2: H - 8 }),
+      bracket: (from, to) => {
+        const bx = boardW + 12
+        const y1 = ROWH * from + 14
+        const y2 = ROWH * (to + 1) - 14
+        return { d: `M ${bx + 12} ${y1} L ${bx} ${y1} L ${bx} ${y2} L ${bx + 12} ${y2}`, tx: bx + 22, ty: (y1 + y2) / 2 }
+      },
+    }
+  }
   const COL = 74
-  const ROW = 46
+  const ROWH = 46
   const TOP = 30
-  const COLS = FRETS.length
-  const W = COL * COLS
-  const BOARD_H = TOP + ROW * 3 + 26
-  const H = BOARD_H + 62
+  const W = COL * FRETS.length
+  const boardH = TOP + ROWH * 3 + 26
+  return {
+    vertical: false,
+    W,
+    H: boardH + 62,
+    boardH,
+    x: (r, c) => COL * c + COL / 2,
+    y: (c, r) => TOP + ROWH * r,
+    rx: 24,
+    ry: 16,
+    font: 15,
+    board: { x: COL, y: 0, w: W - COL, h: boardH },
+    nut: { x: COL - 5, y: 0, w: 7, h: boardH },
+    stringLine: (r) => ({ x1: 6, y1: TOP + ROWH * r, x2: W - 6, y2: TOP + ROWH * r }),
+    bracket: (from, to) => {
+      const x1 = COL * from + COL / 2 - 26
+      const x2 = COL * to + COL / 2 + 26
+      const y = boardH + 8
+      return { d: `M ${x1} ${y + 10} L ${x1} ${y} L ${x2} ${y} L ${x2} ${y + 10}`, tx: (x1 + x2) / 2, ty: y + 32 }
+    },
+  }
+}
 
-  const xOf = (c) => COL * c + COL / 2
-  const yOf = (r) => TOP + ROW * r
+function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, immersive, vertical }) {
+  const L = useMemo(() => fbLayout(vertical), [vertical])
+  const px = (r, c) => (L.vertical ? L.x(r) : L.x(r, c))
+  const py = (r, c) => (L.vertical ? L.y(c) : L.y(c, r))
 
-  /* 指ごとのまとまり（①は2列ぶん、というブラケット） */
   const groups = []
   FRETS.forEach((f, i) => {
     const last = groups[groups.length - 1]
@@ -2156,43 +2211,42 @@ function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, immersi
   })
 
   return (
-    <div className="fb">
+    <div className="fb" data-vertical={L.vertical}>
       <svg
-        viewBox={`0 0 ${W} ${H}`}
+        viewBox={`0 0 ${L.W} ${L.H}`}
         className="fb-svg"
+        preserveAspectRatio="xMidYMid meet"
         role="application"
         aria-label="バイオリンの指板"
       >
-        {/* 指板（開放弦の列は板の外＝ナットの手前） */}
-        <rect x={COL} y="0" width={W - COL} height={BOARD_H} rx="6" className="fb-board" />
-        <rect x={COL - 5} y="0" width="7" height={BOARD_H} className="fb-nut" />
+        <rect {...{ x: L.board.x, y: L.board.y, width: L.board.w, height: L.board.h }} rx="6" className="fb-board" />
+        <rect {...{ x: L.nut.x, y: L.nut.y, width: L.nut.w, height: L.nut.h }} className="fb-nut" />
 
-        {/* 弦 */}
-        {STRINGS.map((s, r) => (
-          <line
-            key={s.id}
-            x1="6"
-            y1={yOf(r)}
-            x2={W - 6}
-            y2={yOf(r)}
-            className="fb-string"
-            strokeWidth={1 + (3 - r) * 0.7}
-          />
-        ))}
+        {STRINGS.map((s, r) => {
+          const l = L.stringLine(r)
+          return (
+            <line
+              key={s.id}
+              {...l}
+              className="fb-string"
+              strokeWidth={1 + (3 - r) * 0.7}
+            />
+          )
+        })}
 
-        {/* 押さえる位置 */}
         {STRINGS.map((s, r) =>
           FRETS.map((f, c) => {
             const midi = s.midi + f.offset
             const pc = ((midi % 12) + 12) % 12
             const jp = JP_NAMES[pc]
-            const sharp = !!jp.flat
             const on = current && current.row === r && current.col === c
+            const cx = px(r, c)
+            const cy = py(r, c)
             return (
               <g
                 key={`${s.id}-${c}`}
                 className="fb-dot"
-                data-sharp={sharp}
+                data-sharp={!!jp.flat}
                 data-on={on}
                 onPointerDown={(e) => {
                   e.preventDefault()
@@ -2202,8 +2256,14 @@ function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, immersi
                 onPointerLeave={onRelease}
                 onPointerCancel={onRelease}
               >
-                <ellipse cx={xOf(c)} cy={yOf(r)} rx="24" ry="16" className="fb-pad" />
-                <text x={xOf(c)} y={yOf(r) + 5} textAnchor="middle" className="fb-text">
+                <ellipse cx={cx} cy={cy} rx={L.rx} ry={L.ry} className="fb-pad" />
+                <text
+                  x={cx}
+                  y={cy + L.font * 0.35}
+                  textAnchor="middle"
+                  className="fb-text"
+                  style={{ fontSize: L.font }}
+                >
                   {jp.sharp}
                 </text>
               </g>
@@ -2211,22 +2271,27 @@ function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, immersi
           })
         )}
 
-        {/* 指のまとまり */}
         {groups.map((g) => {
-          const x1 = xOf(g.from) - 26
-          const x2 = xOf(g.to) + 26
-          const y = BOARD_H + 8
+          const b = L.bracket(g.from, g.to)
           const f = FINGERS[g.finger]
+          const label = L.vertical ? `${f.mark}${f.short}` : `${f.mark}${f.name}`
           return (
             <g key={g.finger}>
-              <path
-                d={`M ${x1} ${y + 10} L ${x1} ${y} L ${x2} ${y} L ${x2} ${y + 10}`}
-                className="fb-bracket"
-              />
-              <text x={(x1 + x2) / 2} y={y + 32} textAnchor="middle" className="fb-finger">
-                {f.mark}
-                {f.name}
-              </text>
+              <path d={b.d} className="fb-bracket" />
+              {L.vertical ? (
+                /* 縦向きは日本語も縦書きにする（写真と同じ） */
+                <text x={b.tx} y={b.ty - ((label.length - 1) * 19) / 2} className="fb-finger" textAnchor="middle">
+                  {label.split('').map((ch, i) => (
+                    <tspan key={i} x={b.tx} dy={i === 0 ? 0 : 19}>
+                      {ch}
+                    </tspan>
+                  ))}
+                </text>
+              ) : (
+                <text x={b.tx} y={b.ty} textAnchor="middle" className="fb-finger">
+                  {label}
+                </text>
+              )}
             </g>
           )
         })}
@@ -2895,11 +2960,8 @@ function Studio() {
             onRelease={releaseFret}
             current={finger}
             immersive={immersive}
+            vertical={immersive.on}
           />
-
-          {immersive.on && mode === 'portrait' && (
-            <p className="turn-hint">横向きにすると指板が大きくなります</p>
-          )}
 
           <p className="hint rotate-hint">
             押している間だけ音が鳴ります。いちばん左の列は開放弦なので、指では押さえずに弾く音です。
@@ -3648,9 +3710,15 @@ body {
   min-height: 0;
   flex: 0 0 auto;
 }
-.app[data-immersive="true"] .fb { flex: 0 1 auto; gap: 10px; }
-.app[data-immersive="true"] .fb-svg { width: 100%; height: auto; max-height: 100%; }
+.app[data-immersive="true"] .fb { flex: 1; min-height: 0; gap: 8px; }
+.app[data-immersive="true"] .fb-svg {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
 .app[data-immersive="true"] .fb-legend { flex: 0 0 auto; }
+.app[data-immersive="true"] .fb-strings { font-size: 10px; }
 
 /* 端末が横を向いても、中身を回して縦のまま見せる */
 .app[data-rotate="true"] .finger-area {

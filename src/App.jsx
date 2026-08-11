@@ -1628,12 +1628,11 @@ function useFingerDemo({ audio, synth, a4, sound }) {
  *  CSS で画面いっぱいに広げるのが本体。使える環境ではそれに加えて
  *  ブラウザの枠も畳み、画面が消灯しないようにする。
  * ============================================================ */
-function useImmersive() {
-  const [on, setOn] = useState(false)
+function useImmersive(active) {
   const [deviceLandscape, setDeviceLandscape] = useState(false)
   const wakeRef = useRef(null)
 
-  /* 端末が今どちらを向いているか。ロック中はこれを見て打ち消す */
+  /* 端末が今どちらを向いているか。縦で固定するのに使う */
   useEffect(() => {
     const mql = window.matchMedia('(orientation: landscape)')
     const sync = (e) => setDeviceLandscape(e.matches)
@@ -1655,85 +1654,66 @@ function useImmersive() {
     }
   }, [])
 
-  const enter = useCallback(async () => {
-    setOn(true)
-    const el = document.documentElement
-    try {
-      if (el.requestFullscreen) await el.requestFullscreen({ navigationUI: 'hide' })
-      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen()
-    } catch {
-      /* 使えない環境では CSS だけで広げる */
-    }
-    // 使える端末では OS 側にも縦固定を頼む（iPhone の Safari は非対応）
-    try {
-      await screen.orientation?.lock?.('portrait')
-    } catch {
-      /* 断られても CSS 側で打ち消すので問題ない */
-    }
-    requestWakeLock()
-  }, [requestWakeLock])
-
-  const exit = useCallback(() => {
-    setOn(false)
-    try {
-      screen.orientation?.unlock?.()
-    } catch {
-      /* 無視してよい */
-    }
-    try {
-      if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen()
-      else if (document.webkitFullscreenElement && document.webkitExitFullscreen)
-        document.webkitExitFullscreen()
-    } catch {
-      /* 無視してよい */
-    }
+  const releaseWakeLock = useCallback(() => {
     wakeRef.current?.release?.().catch(() => {})
     wakeRef.current = null
   }, [])
 
+  /* 画面を広く使う・消灯を防ぐ・向きを固定する、はすべて
+   * 運指タブにいる間だけの副作用。画面を覆うモーダルにはしないので、
+   * 抜けるための操作（✕）は要らない。別のタブを押せばそれで戻る。 */
   useEffect(() => {
-    const sync = () => {
-      const fs = document.fullscreenElement || document.webkitFullscreenElement
-      if (!fs && document.fullscreenEnabled) setOn(false)
+    let cancelled = false
+    if (active) {
+      const el = document.documentElement
+      ;(async () => {
+        try {
+          if (el.requestFullscreen) await el.requestFullscreen({ navigationUI: 'hide' })
+          else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen()
+        } catch {
+          /* 使えない環境では CSS だけで広げる */
+        }
+        if (cancelled) return
+        try {
+          await screen.orientation?.lock?.('portrait')
+        } catch {
+          /* 断られても CSS 側で打ち消すので問題ない */
+        }
+        requestWakeLock()
+      })()
+    } else {
+      try {
+        screen.orientation?.unlock?.()
+      } catch {
+        /* 無視してよい */
+      }
+      try {
+        if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen()
+        else if (document.webkitFullscreenElement && document.webkitExitFullscreen)
+          document.webkitExitFullscreen()
+      } catch {
+        /* 無視してよい */
+      }
+      releaseWakeLock()
     }
-    document.addEventListener('fullscreenchange', sync)
-    document.addEventListener('webkitfullscreenchange', sync)
     return () => {
-      document.removeEventListener('fullscreenchange', sync)
-      document.removeEventListener('webkitfullscreenchange', sync)
+      cancelled = true
     }
-  }, [])
+  }, [active, releaseWakeLock, requestWakeLock])
 
+  /* 画面を離れて戻ったら、消灯防止を取り直す */
   useEffect(() => {
-    if (!on) return
-    const onKey = (e) => {
-      if (e.key === 'Escape') exit()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [on, exit])
-
-  useEffect(() => {
-    if (!on) return
+    if (!active) return
     const onVisible = () => {
       if (document.visibilityState === 'visible') requestWakeLock()
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [on, requestWakeLock])
+  }, [active, requestWakeLock])
 
-  useEffect(
-    () => () => {
-      wakeRef.current?.release?.().catch(() => {})
-      wakeRef.current = null
-    },
-    []
-  )
+  useEffect(() => releaseWakeLock, [releaseWakeLock])
 
-  /* 端末が横を向いているのに縦で固定したいときは、中身を回して打ち消す */
-  const counterRotate = on && deviceLandscape
-
-  return { on, enter, exit, counterRotate }
+  return { on: active, counterRotate: active && deviceLandscape }
 }
 
 /* ============================================================
@@ -2643,19 +2623,27 @@ function fbLayout(vertical) {
       H,
       boardW,
       /* 弦は左から G→D→A→E（STRINGS は E→A→D→G なので逆順） */
-      x: (r) => COLW * (STRINGS.length - 1 - r) + COLW / 2,
+      /* 左手は下から回して弦に触れるので、指の説明は反対側（左）に置く */
+      x: (r) => GUT + COLW * (STRINGS.length - 1 - r) + COLW / 2,
       y: (c) => ROWH * c + ROWH / 2,
       rx: 44,
       ry: 32,
       font: 27,
-      board: { x: 0, y: ROWH, w: boardW, h: H - ROWH },
-      nut: { x: 0, y: ROWH - 6, w: boardW, h: 8 },
-      stringLine: (r) => ({ x1: COLW * (STRINGS.length - 1 - r) + COLW / 2, y1: 8, x2: COLW * (STRINGS.length - 1 - r) + COLW / 2, y2: H - 8 }),
+      board: { x: GUT, y: ROWH, w: boardW, h: H - ROWH },
+      nut: { x: GUT, y: ROWH - 6, w: boardW, h: 8 },
+      stringLine: (r) => {
+        const x = GUT + COLW * (STRINGS.length - 1 - r) + COLW / 2
+        return { x1: x, y1: 8, x2: x, y2: H - 8 }
+      },
       bracket: (from, to) => {
-        const bx = boardW + 12
+        const bx = GUT - 12
         const y1 = ROWH * from + 14
         const y2 = ROWH * (to + 1) - 14
-        return { d: `M ${bx + 12} ${y1} L ${bx} ${y1} L ${bx} ${y2} L ${bx + 12} ${y2}`, tx: bx + 22, ty: (y1 + y2) / 2 }
+        return {
+          d: `M ${bx - 12} ${y1} L ${bx} ${y1} L ${bx} ${y2} L ${bx - 12} ${y2}`,
+          tx: bx - 24,
+          ty: (y1 + y2) / 2,
+        }
       },
     }
   }
@@ -2686,7 +2674,7 @@ function fbLayout(vertical) {
   }
 }
 
-function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, next, pressed, immersive, vertical }) {
+function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, next, pressed, vertical }) {
   const L = useMemo(() => fbLayout(vertical), [vertical])
   const px = (r, c) => (L.vertical ? L.x(r) : L.x(r, c))
   const py = (r, c) => (L.vertical ? L.y(c) : L.y(c, r))
@@ -2801,18 +2789,15 @@ function Fingerboard({ a4, sound, setSound, onPress, onRelease, current, next, p
           <button className="mini toggle" data-on={sound} onClick={() => setSound((v) => !v)}>
             {sound ? '音あり' : '音なし'}
           </button>
-          {!immersive.on && (
-            <button className="mini" onClick={immersive.enter}>
-              全画面
-            </button>
-          )}
         </span>
       </div>
     </div>
   )
 }
 
-/* 押さえた音の表示 */
+/* 押さえた音の表示
+ * ♯の音は別名（レ♭など）が増えて行が折り返し、指板の位置がずれていた。
+ * 高さを固定し、必ず1行に収めることで弦の位置を動かさない。 */
 function FingerReadout({ current, a4 }) {
   if (!current) {
     return (
@@ -2835,13 +2820,15 @@ function FingerReadout({ current, a4 }) {
         {jp.sharp}
         <span className="fr-oct">{octave}</span>
       </span>
-      {jp.flat && <span className="fr-alt">＝ {jp.flat}</span>}
-      <span className="fr-meta">
-        {s.label}線（{s.num}）・{f.mark}
-        {f.name}
-      </span>
-      <span className="fr-hz">
-        {midiToLabel(midi)} · {midiToFreq(midi, a4).toFixed(1)} Hz
+      <span className="fr-rest">
+        {jp.flat && <span className="fr-alt">＝{jp.flat}</span>}
+        <span className="fr-meta">
+          {s.label}線・{f.mark}
+          {f.name}
+        </span>
+        <span className="fr-hz">
+          {midiToLabel(midi)} · {midiToFreq(midi, a4).toFixed(1)} Hz
+        </span>
       </span>
     </div>
   )
@@ -3142,7 +3129,7 @@ function Studio() {
   const metro = useMetronome(audio, bpm, time, blankRef)
   const free = useFreeMode({ audio, pitch, metro, bpm, time, blankRef, keyOverride: freeKey })
   const synth = useViolinSynth(audio)
-  const immersive = useImmersive()
+  const immersive = useImmersive(tab === 'finger')
   const demo = useFingerDemo({ audio, synth, a4, sound })
 
   const piece = tab === 'free' ? free.piece : song
@@ -3196,12 +3183,9 @@ function Studio() {
     synth.release()
     demo.stop()
     setFinger(null)
-    if (immersive.on) immersive.exit()
     // 運指ではマイクを使わないので閉じておく
     if (next === 'finger' && pitch.running) pitch.stop()
     setTab(next)
-    // 運指はそのまま練習に入れるよう、開いた時点で全画面にする
-    if (next === 'finger') immersive.enter()
   }
 
   const pressFret = useCallback(
@@ -3446,12 +3430,6 @@ function Studio() {
         <section className="block finger-area">
           <h2 className="label">運指（第1ポジション）</h2>
 
-          {immersive.on && (
-            <button className="exit-full" onClick={immersive.exit} aria-label="全画面をやめる">
-              ✕
-            </button>
-          )}
-
           <div className="demo-row">
             <span className="demo-label">お手本</span>
             <span className="seg tiny" role="group" aria-label="お手本の動き方">
@@ -3491,7 +3469,6 @@ function Studio() {
             current={shownFret}
             next={demo.pos.next}
             pressed={demo.status === 'playing' ? finger : null}
-            immersive={immersive}
             vertical={immersive.on}
           />
 
@@ -4039,33 +4016,53 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* 押さえた音の表示 */
+/* 押さえた音の表示（高さを固定して指板を動かさない） */
 .fr {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: center;
-  gap: 4px 10px;
-  padding: 12px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  height: 62px;
   margin-bottom: 12px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--paper-2);
-  min-height: 66px;
+  overflow: hidden;
 }
 .fr-jp {
-  font-size: 34px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: baseline;
+  font-size: 30px;
   font-weight: 700;
   line-height: 1;
   color: var(--accent);
+  white-space: nowrap;
 }
 .fr[data-sharp="true"] .fr-jp { color: var(--high); }
 .fr[data-idle="true"] .fr-jp { color: var(--ink-30); }
-.fr-oct { font-size: 17px; color: var(--ink-30); margin-left: 2px; }
-.fr-alt { font-size: 12px; color: var(--low); font-weight: 700; }
-.fr-meta { font-size: 12px; color: var(--ink-60); }
-.fr-hz { font-size: 11px; color: var(--ink-30); font-variant-numeric: tabular-nums; }
-.fr-msg { font-size: 12px; color: var(--ink-30); }
+.fr-oct { font-size: 16px; color: var(--ink-30); margin-left: 3px; }
+.fr-rest {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  overflow: hidden;
+}
+.fr-alt {
+  font-size: 11px;
+  color: var(--low);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.fr-meta { font-size: 12px; color: var(--ink-60); white-space: nowrap; }
+.fr-hz {
+  font-size: 10.5px;
+  color: var(--ink-30);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.fr-msg { font-size: 12px; color: var(--ink-30); white-space: nowrap; }
 .fb-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
 /* 次に押さえる場所を薄く光らせる（音ゲー式の予告） */
@@ -4126,27 +4123,6 @@ body {
 }
 
 /* ---------- 全画面（没入モード） ---------- */
-.exit-full {
-  position: fixed;
-  top: calc(10px + env(safe-area-inset-top));
-  right: calc(10px + env(safe-area-inset-right));
-  z-index: 60;
-  width: 38px;
-  height: 38px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  background: rgba(255,255,255,.92);
-  color: var(--ink-60);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  box-shadow: 0 2px 10px rgba(16,19,28,.16);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-}
 .turn-hint {
   margin: 8px 0 0;
   text-align: center;
@@ -4283,68 +4259,70 @@ body {
 }
 
 /* ============================================================
- *  全画面（運指モード）
- *  ここは画面の向きに関係なく同じ見え方にしたいので、
+ *  運指タブのレイアウト
+ *  画面を覆うモーダルにはしない。タブは出したままにして、
+ *  別のタブを押せばそれがそのまま「戻る」操作になる。
  *  横画面のメディアクエリより後ろに置いて上書きする。
  * ============================================================ */
-.app[data-immersive="true"] { overflow: hidden; }
-.app[data-immersive="true"] .head,
+.app[data-immersive="true"] {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  gap: 10px;
+  padding:
+    calc(10px + env(safe-area-inset-top))
+    calc(12px + env(safe-area-inset-right))
+    calc(10px + env(safe-area-inset-bottom))
+    calc(12px + env(safe-area-inset-left));
+}
 .app[data-immersive="true"] .metronome,
 .app[data-immersive="true"] .foot,
+.app[data-immersive="true"] .songs,
+.app[data-immersive="true"] .score-area,
+.app[data-immersive="true"] .tuning-area,
+.app[data-immersive="true"] .readout-block,
 .app[data-immersive="true"] .finger-area > .label,
 .app[data-immersive="true"] .rotate-hint { display: none; }
 
+/* 見出しは畳んで、タブだけを細く残す */
+.app[data-immersive="true"] .head { flex: 0 0 auto; }
+.app[data-immersive="true"] .head h1 { display: none; }
+.app[data-immersive="true"] .head-sub { display: none; }
+.app[data-immersive="true"] .songs-select { display: none; }
+.app[data-immersive="true"] .tabs { margin-top: 0; padding: 3px; }
+.app[data-immersive="true"] .tabs button { padding: 7px 4px; font-size: 12px; }
+
 .app[data-immersive="true"] .finger-area {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  margin: 0;
-  background: var(--paper);
-  padding:
-    calc(12px + env(safe-area-inset-top))
-    calc(12px + env(safe-area-inset-right))
-    calc(12px + env(safe-area-inset-bottom))
-    calc(12px + env(safe-area-inset-left));
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 10px;
+  gap: 8px;
 }
 .app[data-immersive="true"] .fr {
   margin-bottom: 0;
-  padding: 9px 52px 9px 14px;
-  min-height: 0;
+  height: 54px;
   flex: 0 0 auto;
 }
 .app[data-immersive="true"] .fb { flex: 1; min-height: 0; gap: 8px; }
-.app[data-immersive="true"] .fb-svg {
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  height: 100%;
-}
+.app[data-immersive="true"] .fb-svg { flex: 1; min-height: 0; width: 100%; height: 100%; }
 .app[data-immersive="true"] .fb-legend { flex: 0 0 auto; }
 .app[data-immersive="true"] .fb-strings { font-size: 10px; }
 .app[data-immersive="true"] .demo-row { margin-bottom: 0; flex: 0 0 auto; gap: 6px; }
 .app[data-immersive="true"] .demo-label { display: none; }
-.app[data-immersive="true"] .seg.tiny button { padding: 4px 8px; font-size: 10px; }
 .app[data-immersive="true"] .demo-row .mini { padding: 6px 9px; font-size: 11px; }
+.app[data-immersive="true"] .seg.tiny button { padding: 4px 8px; font-size: 10px; }
 
-/* 端末が横を向いても、中身を回して縦のまま見せる */
-.app[data-rotate="true"] .finger-area {
+/* 端末が横を向いても、画面ごと回して縦のまま見せる */
+.app[data-rotate="true"] {
+  position: fixed;
   top: 0;
   left: 0;
-  right: auto;
-  bottom: auto;
+  max-width: none;
   width: 100vh;
   height: 100vw;
   transform-origin: 0 0;
   transform: translateY(100vh) rotate(-90deg);
-  padding: 16px;
-}
-.app[data-rotate="true"] .exit-full {
-  position: absolute;
-  top: 10px;
-  right: 10px;
+  padding: 12px;
 }
 `

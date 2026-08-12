@@ -3702,13 +3702,24 @@ const CSS = `
   --ink-60: #5a6072;
   --ink-30: #a7adbd;
   --paper: #ffffff;
-  --paper-2: #f6f6f4;
+  --paper-2: #f7f7f5;
+  --paper-3: #eeeeea;
   --line: #e5e5e0;
+  --line-2: #d6d6cf;
   --accent: #25327a;
+  --accent-soft: #eef0f9;
   --ok: #0f8a45;
+  --ok-soft: #edf7f1;
   --high: #d5342b;
   --low: #1f5fd0;
   --brass: #8a6a2f;
+
+  /* 角丸と影は3段階だけ。混ぜると散らかる */
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 18px;
+  --shadow: 0 1px 2px rgba(16,19,28,.05), 0 4px 12px rgba(16,19,28,.05);
+  --shadow-press: 0 1px 2px rgba(16,19,28,.08);
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
@@ -3766,9 +3777,12 @@ body {
 .tabs button[data-on="true"] {
   background: var(--paper);
   color: var(--accent);
-  box-shadow: 0 1px 3px rgba(16,19,28,.1);
+  box-shadow: var(--shadow-press);
 }
 .songs-select { display: none; }
+
+/* 各セクションの容れ物 */
+.block { min-width: 0; }
 
 .label {
   margin: 0 0 10px;
@@ -3778,8 +3792,16 @@ body {
   color: var(--ink-60);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
+/* 見出しの右へ細い罫線を伸ばして、区切りを目で追えるようにする */
+.label::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.label .tag { flex: 0 0 auto; order: 1; }
 
 /* 曲カード */
 .cards-wrap { position: relative; }
@@ -3831,20 +3853,24 @@ body {
   .cards-nav:disabled { opacity: 0; pointer-events: none; }
 }
 .card {
-  flex: 0 0 62%;
+  flex: 0 0 64%;
   scroll-snap-align: start;
   text-align: left;
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 12px 13px;
+  padding: 13px 14px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--r-md);
   background: var(--paper);
   cursor: pointer;
-  transition: border-color .16s, background .16s;
+  transition: border-color .16s, background .16s, box-shadow .16s;
 }
-.card[data-on="true"] { border-color: var(--accent); background: #f7f8fd; }
+.card[data-on="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: var(--shadow);
+}
 .card:disabled { opacity: .5; }
 .card-level { font-size: 10px; color: var(--accent); letter-spacing: .08em; }
 .card-title {
@@ -3860,31 +3886,39 @@ body {
 
 /* ---------- チューニング ---------- */
 .tuning { display: flex; flex-direction: column; gap: 14px; }
+
+/* 対象の切り替え（バイオリン／発声） */
 .seg {
   display: flex;
   gap: 4px;
   padding: 4px;
   background: var(--paper-2);
-  border-radius: 11px;
+  border-radius: 12px;
 }
 .seg button {
   flex: 1;
-  padding: 9px;
+  padding: 10px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 9px;
   background: none;
   color: var(--ink-60);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  transition: background .15s, color .15s;
 }
 .seg button[data-on="true"] {
   background: var(--paper);
   color: var(--accent);
-  box-shadow: 0 1px 3px rgba(16,19,28,.1);
+  box-shadow: var(--shadow-press);
 }
 
-.dial { border-radius: 16px; overflow: hidden; }
+/* アナログ文字盤 */
+.dial {
+  border-radius: var(--r-md);
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
 .dial-svg { display: block; width: 100%; height: auto; }
 .dial-tick { stroke: #b9a887; }
 .dial-tick.major { stroke: var(--brass); }
@@ -3910,18 +3944,23 @@ body {
 .dial-unit { font-size: 8px; fill: #b9a887; letter-spacing: .3em; }
 .dial-edge { font-size: 10px; fill: #b9a887; letter-spacing: .06em; }
 
+/* 状態の一言。ここだけ見れば次の操作が分かるようにする */
 .tune-msg {
   margin: 0;
+  padding: 11px 12px;
   text-align: center;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--ink-30);
+  background: var(--paper-2);
+  border-radius: var(--r-sm);
   font-variant-numeric: tabular-nums;
 }
-.tune-msg[data-state="ok"] { color: var(--ok); }
-.tune-msg[data-state="high"] { color: var(--high); }
-.tune-msg[data-state="low"] { color: var(--low); }
+.tune-msg[data-state="ok"] { color: var(--ok); background: var(--ok-soft); }
+.tune-msg[data-state="high"] { color: var(--high); background: #fdf1f0; }
+.tune-msg[data-state="low"] { color: var(--low); background: #eef2fd; }
 
+/* 4本の弦 */
 .strings { display: flex; gap: 8px; }
 .string {
   flex: 1;
@@ -3929,20 +3968,28 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding: 10px 2px 9px;
+  gap: 3px;
+  padding: 12px 2px 10px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--r-md);
   background: var(--paper);
-  transition: border-color .15s, background .15s;
+  transition: border-color .15s, background .15s, box-shadow .15s;
 }
-.string[data-on="true"] { border-color: var(--accent); background: #f7f8fd; }
-.string[data-ok="true"] { border-color: var(--ok); background: #f2faf5; }
+.string[data-on="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: var(--shadow);
+}
+.string[data-ok="true"] {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+}
 .string-name {
   font-family: Iowan Old Style, "Times New Roman", serif;
-  font-size: 21px;
+  font-size: 23px;
   font-weight: 600;
   line-height: 1;
+  color: var(--ink);
 }
 .string[data-on="true"] .string-name { color: var(--accent); }
 .string[data-ok="true"] .string-name { color: var(--ok); }
@@ -3950,18 +3997,248 @@ body {
 .string-hz { font-size: 9.5px; color: var(--ink-30); font-variant-numeric: tabular-nums; }
 .string-cents {
   position: absolute;
-  top: -8px;
-  right: -4px;
+  top: -9px;
+  right: -3px;
   font-size: 10px;
   font-weight: 700;
-  padding: 1px 6px;
+  padding: 2px 7px;
   border-radius: 999px;
   background: var(--accent);
   color: #fff;
+  box-shadow: var(--shadow-press);
   font-variant-numeric: tabular-nums;
 }
 .string[data-ok="true"] .string-cents { background: var(--ok); }
 .voice-range { text-align: center; font-size: 11px; color: var(--ink-30); }
+
+/* 発声モードの鍵盤 */
+.kb { display: flex; flex-direction: column; gap: 10px; }
+.kb-svg { display: block; width: 100%; height: auto; }
+.kb-white {
+  fill: var(--paper);
+  stroke: var(--line-2);
+  stroke-width: 1;
+  transition: fill .1s;
+}
+.kb-black { fill: #2a2d38; transition: fill .1s; }
+.kb-label {
+  font-size: 13px;
+  fill: var(--ink-60);
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  font-weight: 600;
+}
+.kb-sharp {
+  font-size: 9px;
+  fill: #ff8b84;
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  font-weight: 700;
+}
+.kb-flat {
+  font-size: 9px;
+  fill: #8fb4f2;
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  font-weight: 700;
+}
+.kb-oct-on { font-size: 11px; fill: #fff; font-weight: 700; opacity: .85; }
+.kb-now {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+}
+.kb-now-name {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: .02em;
+}
+.kb-now-name.idle { color: var(--ink-30); }
+.kb-now-oct { font-size: 18px; color: var(--ink-30); font-weight: 600; }
+.kb-now-alt { font-size: 11px; color: var(--ink-60); }
+
+.voice-read {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-60);
+  font-variant-numeric: tabular-nums;
+}
+.voice-read[data-state="ok"] .voice-cents { color: var(--ok); font-weight: 700; }
+.voice-read[data-state="high"] .voice-cents { color: var(--high); font-weight: 700; }
+.voice-read[data-state="low"] .voice-cents { color: var(--low); font-weight: 700; }
+.voice-sep { color: var(--ink-30); }
+.voice-hz { color: var(--ink); font-weight: 600; }
+.voice-hz.idle { color: var(--ink-30); font-weight: 400; }
+
+.voice-bar {
+  position: relative;
+  height: 24px;
+  border-radius: var(--r-sm);
+  background: var(--paper-2);
+  overflow: hidden;
+}
+.vb-zone {
+  position: absolute; bottom: 0; left: 45%; width: 10%; height: 100%;
+  background: rgba(15,138,69,.12);
+}
+.vb-center {
+  position: absolute; bottom: 0; left: 50%; width: 1px; height: 100%;
+  background: var(--line-2); transform: translateX(-50%);
+}
+.vb-needle {
+  position: absolute; bottom: 0; width: 3px; height: 100%; border-radius: 2px;
+  background: var(--ink-30); transform: translateX(-50%);
+  transition: left .07s linear, background .12s;
+}
+.voice-bar[data-state="ok"] .vb-needle { background: var(--ok); }
+.voice-bar[data-state="high"] .vb-needle { background: var(--high); }
+.voice-bar[data-state="low"] .vb-needle { background: var(--low); }
+
+/* ---------- 譜面まわりの操作 ---------- */
+.score-controls {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.score-count {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: 1;
+}
+/* 小さめのボタンとセレクトは全部この形にそろえる */
+.mini {
+  font-size: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.mini:disabled { color: var(--ink-30); cursor: default; background: var(--paper-2); }
+.mini.grow { flex: 1; }
+/* 押している間だけ色が反転するトグル（音あり／クリック など） */
+.toggle[data-on="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* ---------- 演奏の講評 ---------- */
+.review {
+  margin: 12px 0 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 15px 14px;
+  background: var(--paper-2);
+}
+.review[data-tone="ok"] { border-color: #bfe0cd; background: var(--ok-soft); }
+.review-head { display: flex; align-items: center; gap: 13px; }
+.review-badge {
+  width: 44px; height: 44px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-family: Iowan Old Style, "Times New Roman", serif;
+  font-size: 22px; font-weight: 700;
+  background: var(--ink-30); color: #fff;
+}
+.review[data-tone="ok"] .review-badge { background: var(--ok); }
+.review-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.review-headline { font-size: 15px; font-weight: 700; }
+.review[data-tone="ok"] .review-headline { color: var(--ok); }
+.review-score {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.review-score em { font-style: normal; font-size: 11px; font-weight: 500; color: var(--ink-60); }
+.review-count { font-size: 11px; font-weight: 500; color: var(--ink-60); }
+.review-bar {
+  margin-top: 12px; height: 6px; border-radius: 3px;
+  background: var(--paper-3); overflow: hidden;
+}
+.review-bar span {
+  display: block; height: 100%; border-radius: 3px;
+  background: var(--ink-30); transition: width .5s ease-out;
+}
+.review[data-tone="ok"] .review-bar span { background: var(--ok); }
+.review-points {
+  margin: 11px 0 0; padding-left: 18px;
+  font-size: 12px; color: var(--ink-60); line-height: 1.7;
+}
+.review-points li { margin-top: 2px; }
+
+/* ---------- 楽譜 ---------- */
+.score {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper);
+  min-height: 220px;
+  padding: 12px 8px;
+  overflow-x: hidden;
+  transition: border-color .2s, box-shadow .2s;
+}
+/* 演奏中は枠を立てて「今動いている」ことを示す */
+.score[data-playing="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.score-inner { position: relative; width: 100%; }
+.score-host { width: 100%; }
+.score-host svg { display: block; max-width: 100%; height: auto; }
+.score-msg {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 28px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink-30);
+  background: var(--paper);
+  border-radius: var(--r-md);
+}
+.score-msg.error { color: var(--high); }
+
+/* 外れ方の札 */
+.marks { position: absolute; inset: 0; pointer-events: none; }
+.mark {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  margin-top: -3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid var(--c);
+  color: var(--c);
+  box-shadow: var(--shadow-press);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.mark-arrow { font-size: 8px; }
 
 /* ---------- 運指 ---------- */
 .fb { display: flex; flex-direction: column; gap: 10px; }
@@ -3973,15 +4250,15 @@ body {
   user-select: none;
   -webkit-user-select: none;
 }
-.fb-board { fill: #23201d; }
-.fb-nut { fill: #e8e2d4; }
+.fb-board { fill: #201d1a; }
+.fb-nut { fill: #ded6c4; }
 .fb-string { stroke: #cfc9bd; }
 .fb-dot { cursor: pointer; }
 .fb-pad {
   fill: #ffffff;
-  stroke: #d8d8d2;
+  stroke: #cfcfc8;
   stroke-width: 1;
-  transition: fill .08s;
+  transition: fill .08s, stroke .08s;
 }
 .fb-dot[data-sharp="true"] .fb-pad { fill: #f6cfe0; stroke: #e6aec7; }
 .fb-dot[data-on="true"] .fb-pad { fill: var(--accent); stroke: var(--accent); }
@@ -4025,7 +4302,7 @@ body {
   height: 62px;
   margin-bottom: 12px;
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: var(--r-md);
   background: var(--paper-2);
   overflow: hidden;
 }
@@ -4120,7 +4397,154 @@ body {
   flex-shrink: 0;
   color: var(--high);
   border-color: #f0d5d3;
+  background: #fdf1f0;
+  font-weight: 600;
 }
+
+/* ---------- マイクと音名 ---------- */
+.readout-block {
+  border-top: 1px solid var(--line);
+  padding-top: 22px;
+}
+/* 音名・メーター・レベルをひとつの計器としてまとめる */
+.readout {
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper);
+  padding: 18px 16px 14px;
+}
+.note {
+  font-family: Iowan Old Style, "Times New Roman", serif;
+  line-height: 1;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 2px;
+  color: var(--ink-30);
+  transition: color .12s;
+}
+.app[data-state="ok"] .note { color: var(--ok); }
+.app[data-state="high"] .note { color: var(--high); }
+.app[data-state="low"] .note { color: var(--low); }
+.note-name { font-size: 68px; font-weight: 500; letter-spacing: -.02em; }
+.note-name sup { font-size: 28px; }
+.note-oct { font-size: 24px; color: var(--ink-30); }
+.freq {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ink-60);
+  font-variant-numeric: tabular-nums;
+}
+
+/* メーター：中央が基準、緑の帯が合格の幅 */
+.meter { margin-top: 18px; }
+.meter-scale {
+  position: relative;
+  height: 46px;
+  border-radius: var(--r-sm);
+  background: var(--paper-2);
+  overflow: hidden;
+}
+.tick {
+  position: absolute; bottom: 0; width: 1px; height: 9px;
+  background: var(--ink-30); opacity: .55; transform: translateX(-50%);
+}
+.tick[data-center="true"] { height: 100%; background: var(--line-2); opacity: 1; }
+.meter-zone {
+  position: absolute; bottom: 0; left: 42%; width: 16%; height: 100%;
+  background: rgba(15,138,69,.1);
+}
+.needle {
+  position: absolute; bottom: 0; width: 3px; height: 100%;
+  background: var(--ink-30); transform: translateX(-50%);
+  transition: left .07s linear, background .12s; border-radius: 2px;
+}
+.meter[data-state="ok"] .needle { background: var(--ok); }
+.meter[data-state="high"] .needle { background: var(--high); }
+.meter[data-state="low"] .needle { background: var(--low); }
+.meter-labels {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 8px;
+  font-size: 11px; color: var(--ink-30);
+}
+.lab-low { color: var(--low); }
+.lab-high { color: var(--high); }
+.cents {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 入力レベル */
+.level {
+  margin-top: 14px;
+  height: 4px;
+  background: var(--paper-3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.level-bar {
+  height: 100%;
+  background: var(--accent);
+  opacity: .4;
+  border-radius: 2px;
+  transition: width .08s linear;
+}
+
+/* 操作。主ボタンは常に画面の同じ高さに来るようにしてある */
+.controls { margin-top: 14px; display: flex; align-items: stretch; gap: 10px; }
+.mic {
+  flex: 1; padding: 16px 10px; border: 0; border-radius: var(--r-md);
+  background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
+  cursor: pointer; font-variant-numeric: tabular-nums;
+  box-shadow: var(--shadow);
+  transition: background .15s;
+}
+.mic[data-phase="armed"] { background: #6b74a8; }
+.mic[data-phase="countin"] { background: var(--ink); }
+.mic[data-phase="playing"] { background: var(--ok); }
+.reset {
+  padding: 0 18px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--paper); color: var(--ink-60); font-size: 13px; cursor: pointer;
+}
+.reset:disabled { color: var(--ink-30); cursor: default; }
+.a4 {
+  margin-top: 12px; font-size: 11px; color: var(--ink-60);
+  display: flex; align-items: center; gap: 8px;
+}
+.a4 select {
+  font-size: 13px; padding: 7px 10px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: var(--paper); color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.error { margin: 14px 0 0; font-size: 12px; color: var(--high); line-height: 1.6; }
+.notice { margin: 12px 0 0; font-size: 11px; color: var(--ink-60); line-height: 1.6; }
+.foot { font-size: 11px; color: var(--ink-30); text-align: center; }
+
+/* クラッシュ画面 */
+.crash {
+  max-width: 480px; margin: 0 auto; padding: 40px 20px;
+  background: var(--paper); min-height: 100%;
+}
+.crash h2 { font-size: 17px; margin: 0 0 8px; }
+.crash p { font-size: 13px; color: var(--ink-60); margin: 0 0 14px; }
+.crash pre {
+  font-size: 11px; color: var(--high); background: var(--paper-2);
+  padding: 10px 12px; border-radius: var(--r-sm);
+  white-space: pre-wrap; word-break: break-word;
+}
+.crash button {
+  margin-top: 14px; padding: 12px 18px; border: 0; border-radius: var(--r-md);
+  background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+
+button:focus-visible, select:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 
 /* ---------- 全画面（没入モード） ---------- */
 .turn-hint {
@@ -4176,7 +4600,7 @@ body {
   .score-controls { margin-top: 6px; gap: 6px; }
   .score-controls .mini { padding: 5px 8px; font-size: 11px; }
   .score-count { font-size: 11px; padding: 0 8px; }
-  .review { margin-top: 6px; padding: 8px 10px; border-radius: 10px; }
+  .review { margin-top: 6px; padding: 8px 10px; border-radius: var(--r-sm); }
   .review-badge { width: 30px; height: 30px; font-size: 15px; }
   .review-headline { font-size: 12px; }
   .review-score { font-size: 15px; }
@@ -4189,12 +4613,13 @@ body {
   }
   .tuning { gap: 8px; min-height: 0; flex: 1; }
   .seg { padding: 3px; }
-  .seg button { padding: 5px; font-size: 11px; }
+  .seg button { padding: 6px; font-size: 11px; }
+  .tune-msg { padding: 6px 8px; }
   .dial { flex: 1; min-height: 0; display: flex; }
   .dial-svg { height: 100%; width: auto; margin: 0 auto; }
   .tune-msg { font-size: 12px; }
   .strings { gap: 6px; }
-  .string { padding: 6px 2px 5px; border-radius: 9px; }
+  .string { padding: 7px 2px 6px; border-radius: var(--r-sm); gap: 1px; }
   .string-name { font-size: 16px; }
   .string-sub, .string-hz { font-size: 8.5px; }
   .voice-range { font-size: 9px; }
@@ -4208,8 +4633,8 @@ body {
   .fb-legend { gap: 6px; }
   .fb-strings { font-size: 9px; gap: 2px 7px; }
   .fr {
-    padding: 5px 8px; margin-bottom: 0; border-radius: 9px;
-    min-height: 0; gap: 2px 8px;
+    padding: 0 10px; margin-bottom: 0; border-radius: var(--r-sm);
+    height: 46px; gap: 10px;
   }
   .fr-jp { font-size: 20px; }
   .fr-oct { font-size: 12px; }
@@ -4230,31 +4655,33 @@ body {
     border-top: 0; padding-top: 0;
     display: flex; flex-direction: column; justify-content: center;
   }
+  .readout { padding: 10px 10px 8px; border-radius: var(--r-sm); }
   .note-name { font-size: 38px; }
   .note-name sup { font-size: 17px; }
   .note-oct { font-size: 15px; }
-  .freq { margin-top: 2px; font-size: 10px; }
+  .freq { margin-top: 3px; font-size: 10px; }
   .meter { margin-top: 8px; }
   .meter-scale { height: 22px; }
-  .meter-labels { font-size: 9px; margin-top: 3px; }
-  .level { margin-top: 6px; }
+  .meter-labels { font-size: 9px; margin-top: 4px; }
+  .cents { font-size: 10px; }
+  .level { margin-top: 7px; }
   .controls { margin-top: 8px; gap: 6px; }
-  .mic { padding: 10px 6px; font-size: 12px; border-radius: 10px; }
-  .reset { padding: 0 10px; font-size: 11px; border-radius: 10px; }
+  .mic { padding: 11px 6px; font-size: 12px; border-radius: var(--r-sm); }
+  .reset { padding: 0 10px; font-size: 11px; border-radius: var(--r-sm); }
   .a4 { margin-top: 6px; font-size: 10px; }
   .a4 select { font-size: 11px; padding: 3px 6px; }
   .error, .notice { margin-top: 6px; font-size: 10px; }
 
   .metronome { grid-column: 2; grid-row: 3; }
-  .metro { padding: 8px; gap: 7px; border-radius: 10px; }
-  .beats { height: 14px; gap: 6px; }
-  .beat { width: 9px; height: 9px; }
-  .beat[data-accent="true"] { width: 11px; height: 11px; }
+  .metro { padding: 9px 8px 8px; gap: 8px; border-radius: var(--r-sm); }
+  .beats { height: 12px; gap: 7px; }
+  .beat { width: 8px; height: 8px; }
   .metro-row { gap: 6px; }
-  .bpm { font-size: 11px; }
-  .bpm button { padding: 4px 7px; font-size: 15px; }
-  .bpm-val b { font-size: 13px; }
-  .metro-btn { padding: 6px; font-size: 11px; }
+  .bpm { font-size: 10px; padding: 1px; }
+  .bpm button { width: 22px; height: 22px; font-size: 13px; }
+  .bpm-val { padding: 0 5px; }
+  .bpm-val b { font-size: 15px; }
+  .metro-btn { padding: 7px; font-size: 11px; }
   .bpm-slider { display: none; }
 }
 

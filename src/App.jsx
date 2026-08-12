@@ -2837,7 +2837,8 @@ function FingerReadout({ current, a4 }) {
 function Metronome({ bpm, setBpm, time, setTime, metro, disabled }) {
   const unit = time.beatType === 8 ? '♪' : '♩'
   return (
-    <div className="metro">
+    <div className="metro" data-on={metro.running}>
+      {/* 拍・テンポ・拍子・開始を1行に収める */}
       <div className="beats" aria-hidden="true">
         {Array.from({ length: time.beats }, (_, i) => (
           <span
@@ -2849,54 +2850,43 @@ function Metronome({ bpm, setBpm, time, setTime, metro, disabled }) {
         ))}
       </div>
 
-      <div className="metro-row">
-        <div className="bpm">
-          <button onClick={() => setBpm((v) => Math.max(30, v - 1))} aria-label="テンポを1下げる">
-            −
-          </button>
-          <span className="bpm-val">
-            {unit}= <b>{bpm}</b>
-          </span>
-          <button onClick={() => setBpm((v) => Math.min(240, v + 1))} aria-label="テンポを1上げる">
-            ＋
-          </button>
-        </div>
-
-        <select
-          className="mini"
-          value={sigId(time)}
-          onChange={(e) => {
-            const t = TIME_OPTIONS.find((o) => o.id === e.target.value)
-            setTime({ beats: t.beats, beatType: t.beatType })
-          }}
-          disabled={disabled}
-          aria-label="拍子"
-        >
-          {TIME_OPTIONS.map((o) => (
-            <option key={o.id} value={o.id}>
-              {o.id}
-            </option>
-          ))}
-        </select>
-
-        <button
-          className="metro-btn"
-          data-on={metro.running}
-          onClick={() => (metro.running ? metro.stop() : metro.start())}
-        >
-          {metro.running ? '停止' : '開始'}
+      <div className="bpm">
+        <button onClick={() => setBpm((v) => Math.max(30, v - 1))} aria-label="テンポを1下げる">
+          −
+        </button>
+        <span className="bpm-val">
+          {unit}=<b>{bpm}</b>
+        </span>
+        <button onClick={() => setBpm((v) => Math.min(240, v + 1))} aria-label="テンポを1上げる">
+          ＋
         </button>
       </div>
 
-      <input
-        className="bpm-slider"
-        type="range"
-        min={30}
-        max={240}
-        value={bpm}
-        onChange={(e) => setBpm(Number(e.target.value))}
-        aria-label="テンポ"
-      />
+      <select
+        className="metro-sig"
+        value={sigId(time)}
+        onChange={(e) => {
+          const t = TIME_OPTIONS.find((o) => o.id === e.target.value)
+          setTime({ beats: t.beats, beatType: t.beatType })
+        }}
+        disabled={disabled}
+        aria-label="拍子"
+      >
+        {TIME_OPTIONS.map((o) => (
+          <option key={o.id} value={o.id}>
+            {o.id}
+          </option>
+        ))}
+      </select>
+
+      <button
+        className="metro-btn"
+        data-on={metro.running}
+        onClick={() => (metro.running ? metro.stop() : metro.start())}
+        aria-label={metro.running ? 'メトロノームを止める' : 'メトロノームを鳴らす'}
+      >
+        {metro.running ? '停止' : '開始'}
+      </button>
     </div>
   )
 }
@@ -3354,7 +3344,7 @@ function Studio() {
           >
             {SONGS.map((s) => (
               <option key={s.id} value={s.id}>
-                {s.title}（{s.keyName} {sigId(s.time)}）
+                {s.title}
               </option>
             ))}
           </select>
@@ -3364,7 +3354,7 @@ function Studio() {
       {/* 上：曲を選ぶ（練習モードのみ） */}
       {tab === 'practice' && (
         <section className="block songs">
-          <h2 className="label">曲を選ぶ</h2>
+          <h2 className="label quiet">曲を選ぶ</h2>
           <div className="cards-wrap">
             <button
               className="cards-nav"
@@ -3387,12 +3377,7 @@ function Studio() {
                   disabled={busy}
                   onClick={() => setSongId(s.id)}
                 >
-                  <span className="card-level">{s.level}</span>
                   <span className="card-title">{s.title}</span>
-                  <span className="card-sub">{s.subtitle}</span>
-                  <span className="card-meta">
-                    {s.keyName} · {sigId(s.time)} · ♩= {s.bpm}
-                  </span>
                 </button>
               ))}
             </div>
@@ -3407,7 +3392,6 @@ function Studio() {
               ›
             </button>
           </div>
-          <p className="hint">{song.note}</p>
         </section>
       )}
 
@@ -3483,7 +3467,7 @@ function Studio() {
       {/* 真ん中：楽譜 */}
       {tab !== 'tuning' && tab !== 'finger' && (
         <section className="block score-area">
-          <h2 className="label">{tab === 'free' ? '採譜した楽譜' : '楽譜'}</h2>
+          <h2 className="label quiet">{tab === 'free' ? '採譜した楽譜' : '楽譜'}</h2>
 
           <div className="score" data-playing={playing || free.recording} ref={score.scrollRef}>
             <div className="score-inner" ref={score.innerRef}>
@@ -3614,7 +3598,7 @@ function Studio() {
       {/* メトロノーム（チューニング中は隠す） */}
       {tab !== 'tuning' && (
         <section className="block metronome">
-          <h2 className="label">メトロノーム</h2>
+          <h2 className="label quiet">メトロノーム</h2>
           <Metronome
             bpm={bpm}
             setBpm={setBpm}
@@ -3623,10 +3607,6 @@ function Studio() {
             metro={metroApi}
             disabled={busy}
           />
-          <p className="hint rotate-hint">
-            拍子を変えると小節線を引き直します（またぐ音符はタイでつなぎます）。
-            鳴らしながら録るとリズムが揃います。
-          </p>
         </section>
       )}
 
@@ -3634,14 +3614,16 @@ function Studio() {
       {tab !== 'finger' && (
       <section className="block readout-block">
         <div className="readout">
-          <div className="note">
+          <div className="readout-top">
+            <div className="readout-id">
+              <div className="note">
             <span className="note-name">
               {live ? reading.name.replace('#', '') : '—'}
               {live && reading.name.includes('#') && <sup>♯</sup>}
             </span>
-            <span className="note-oct">{live ? reading.octave : ''}</span>
-          </div>
-          <div className="freq">
+                <span className="note-oct">{live ? reading.octave : ''}</span>
+              </div>
+              <div className="freq">
             {tab === 'practice' && (playing || session.phase === 'armed')
               ? `譜面 ${target}${live ? ` ／ ${reading.freq.toFixed(1)} Hz` : ''}`
               : live
@@ -3649,13 +3631,15 @@ function Studio() {
                 : pitch.running
                   ? '音を鳴らしてください'
                   : 'マイクは停止中'}
+              </div>
+            </div>
+
+            <TunerMeter cents={reading?.cents ?? 0} state={tunerState} />
           </div>
-        </div>
 
-        <TunerMeter cents={reading?.cents ?? 0} state={tunerState} />
-
-        <div className="level" aria-hidden="true">
-          <div className="level-bar" style={{ width: `${Math.round(pitch.level * 100)}%` }} />
+          <div className="level" aria-hidden="true">
+            <div className="level-bar" style={{ width: `${Math.round(pitch.level * 100)}%` }} />
+          </div>
         </div>
 
         {pitch.error && <p className="error">{pitch.error}</p>}
@@ -3736,25 +3720,25 @@ body {
   margin: 0 auto;
   min-height: 100%;
   background: var(--paper);
-  padding: 20px 18px 40px;
+  padding: 14px 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 26px;
+  gap: 13px;
 }
 
 .head h1 {
   margin: 0;
   font-family: Iowan Old Style, "Times New Roman", serif;
-  font-size: 22px;
+  font-size: 19px;
   font-weight: 600;
   letter-spacing: .02em;
   color: var(--accent);
 }
-.head .clef { font-size: 26px; margin-right: 4px; }
+.head .clef { font-size: 22px; margin-right: 4px; }
 
 /* タブ */
 .tabs {
-  margin-top: 14px;
+  margin-top: 10px;
   display: flex;
   gap: 4px;
   padding: 4px;
@@ -3763,7 +3747,7 @@ body {
 }
 .tabs button {
   flex: 1;
-  padding: 9px 4px;
+  padding: 8px 4px;
   border: 0;
   border-radius: 9px;
   background: none;
@@ -3784,6 +3768,15 @@ body {
 /* 各セクションの容れ物 */
 .block { min-width: 0; }
 
+/* 画面には出さず、読み上げにだけ残す見出し */
+.label.quiet {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.label.quiet::after { display: none; }
+
 .label {
   margin: 0 0 10px;
   font-size: 11px;
@@ -3803,30 +3796,42 @@ body {
 }
 .label .tag { flex: 0 0 auto; order: 1; }
 
-/* 曲カード */
+/* 曲の選択。曲名だけのチップにして、譜面に高さを譲る */
 .cards-wrap { position: relative; }
 .cards {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   overflow-x: auto;
-  padding-bottom: 4px;
-  scroll-snap-type: x mandatory;
+  padding: 2px 0;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
 }
 .cards::-webkit-scrollbar { display: none; }
-/* ドラッグ中はスナップを切る（引っかかって動かなくなるため） */
-.cards[data-dragging="on"] {
-  scroll-snap-type: none;
-  scroll-behavior: auto;
+.cards[data-dragging="on"] { scroll-behavior: auto; }
+.card {
+  flex: 0 0 auto;
+  padding: 9px 15px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink-60);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .16s, background .16s, color .16s, box-shadow .16s;
 }
+.card[data-on="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  box-shadow: var(--shadow);
+}
+.card:disabled { opacity: .5; }
+.card-title { font-size: 13.5px; font-weight: 600; }
 
-/* 左右の送りボタン。マウスのある環境にだけ出す */
 .cards-nav { display: none; }
 @media (hover: hover) and (pointer: fine) {
   .cards { cursor: grab; }
   .cards[data-dragging="on"] { cursor: grabbing; }
-  .cards[data-dragging="on"] .card { cursor: grabbing; }
   .cards-nav {
     display: flex;
     align-items: center;
@@ -3835,52 +3840,25 @@ body {
     top: 50%;
     transform: translateY(-50%);
     z-index: 2;
-    width: 30px;
-    height: 30px;
+    width: 28px;
+    height: 28px;
     padding: 0 0 3px;
     border: 1px solid var(--line);
     border-radius: 50%;
     background: var(--paper);
     color: var(--accent);
-    font-size: 19px;
+    font-size: 18px;
     line-height: 1;
     cursor: pointer;
-    box-shadow: 0 1px 6px rgba(16,19,28,.14);
+    box-shadow: var(--shadow);
     transition: opacity .15s;
   }
-  .cards-nav[data-side="prev"] { left: -10px; }
-  .cards-nav[data-side="next"] { right: -10px; }
+  .cards-nav[data-side="prev"] { left: -8px; }
+  .cards-nav[data-side="next"] { right: -8px; }
   .cards-nav:disabled { opacity: 0; pointer-events: none; }
 }
-.card {
-  flex: 0 0 64%;
-  scroll-snap-align: start;
-  text-align: left;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 13px 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--paper);
-  cursor: pointer;
-  transition: border-color .16s, background .16s, box-shadow .16s;
-}
-.card[data-on="true"] {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  box-shadow: var(--shadow);
-}
-.card:disabled { opacity: .5; }
-.card-level { font-size: 10px; color: var(--accent); letter-spacing: .08em; }
-.card-title {
-  font-family: Iowan Old Style, "Times New Roman", serif;
-  font-size: 16px;
-  font-weight: 600;
-}
-.card-sub { font-size: 11px; color: var(--ink-60); }
-.card-meta { font-size: 11px; color: var(--ink-30); margin-top: 2px; }
-.hint { margin: 10px 2px 0; font-size: 12px; color: var(--ink-60); line-height: 1.6; }
+
+.hint { margin: 8px 2px 0; font-size: 11.5px; color: var(--ink-60); line-height: 1.6; }
 .sw-high { color: var(--high); font-weight: 700; }
 .sw-low { color: var(--low); font-weight: 700; }
 
@@ -4099,7 +4077,7 @@ body {
 
 /* ---------- 譜面まわりの操作 ---------- */
 .score-controls {
-  margin-top: 12px;
+  margin-top: 10px;
   display: flex;
   gap: 8px;
   align-items: stretch;
@@ -4187,8 +4165,8 @@ body {
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--paper);
-  min-height: 220px;
-  padding: 12px 8px;
+  min-height: 176px;
+  padding: 10px 8px;
   overflow-x: hidden;
   transition: border-color .2s, box-shadow .2s;
 }
@@ -4401,19 +4379,80 @@ body {
   font-weight: 600;
 }
 
-/* ---------- マイクと音名 ---------- */
-.readout-block {
-  border-top: 1px solid var(--line);
-  padding-top: 22px;
+/* ---------- メトロノーム ----------
+ * 主役は譜面なので、1行の帯にたたむ */
+.metro {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  transition: border-color .2s, background .2s;
 }
-/* 音名・メーター・レベルをひとつの計器としてまとめる */
+.metro[data-on="true"] { border-color: var(--accent); background: var(--accent-soft); }
+
+.beats { display: flex; gap: 7px; align-items: center; flex: 1; min-width: 0; }
+.beat {
+  width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+  background: var(--paper-3);
+  border: 1px solid transparent;
+  transition: transform .08s ease-out, background .08s, box-shadow .08s;
+}
+.metro[data-on="true"] .beat { background: #dfe3f1; }
+.beat[data-accent="true"] { border-color: var(--line-2); }
+.beat[data-on="true"] {
+  background: var(--accent);
+  transform: scale(1.45);
+  box-shadow: 0 0 0 3px rgba(37,50,122,.15);
+}
+.beat[data-accent="true"][data-on="true"] { background: var(--ink); }
+
+.bpm {
+  display: flex; align-items: center; gap: 1px; flex-shrink: 0;
+  font-size: 11px; color: var(--ink-60);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.bpm button {
+  width: 26px; height: 26px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 50%;
+  background: var(--paper); color: var(--accent);
+  font-size: 14px; line-height: 1; cursor: pointer;
+}
+.bpm button:active { background: var(--accent-soft); }
+.bpm-val { padding: 0 5px; display: flex; align-items: baseline; gap: 1px; }
+.bpm-val b { font-size: 17px; font-weight: 700; color: var(--ink); letter-spacing: -.01em; }
+
+.metro-sig {
+  flex-shrink: 0;
+  font-size: 11px; padding: 5px 4px 5px 7px;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--paper); color: var(--ink-60);
+  font-variant-numeric: tabular-nums;
+}
+.metro-btn {
+  flex-shrink: 0;
+  min-width: 58px;
+  border: 1px solid var(--accent); border-radius: 999px;
+  background: var(--paper); color: var(--accent);
+  font-size: 12px; font-weight: 700; cursor: pointer; padding: 7px 12px;
+  transition: background .15s, color .15s;
+}
+.metro-btn[data-on="true"] { background: var(--accent); color: #fff; }
+
+/* ---------- マイクと音名 ---------- */
+.readout-block { padding-top: 0; }
 .readout {
-  text-align: center;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--paper);
-  padding: 18px 16px 14px;
+  padding: 12px 14px;
 }
+/* 音名は左、メーターは右。縦に積むと1画面に入らない */
+.readout-top { display: flex; align-items: center; gap: 14px; }
+.readout-id { flex: 0 0 auto; min-width: 92px; text-align: center; }
 .note {
   font-family: Iowan Old Style, "Times New Roman", serif;
   line-height: 1;
@@ -4427,27 +4466,28 @@ body {
 .app[data-state="ok"] .note { color: var(--ok); }
 .app[data-state="high"] .note { color: var(--high); }
 .app[data-state="low"] .note { color: var(--low); }
-.note-name { font-size: 68px; font-weight: 500; letter-spacing: -.02em; }
-.note-name sup { font-size: 28px; }
-.note-oct { font-size: 24px; color: var(--ink-30); }
+.note-name { font-size: 46px; font-weight: 500; letter-spacing: -.02em; }
+.note-name sup { font-size: 20px; }
+.note-oct { font-size: 18px; color: var(--ink-30); }
 .freq {
-  margin-top: 8px;
-  font-size: 12px;
+  margin-top: 5px;
+  font-size: 10.5px;
+  line-height: 1.4;
   color: var(--ink-60);
   font-variant-numeric: tabular-nums;
 }
 
 /* メーター：中央が基準、緑の帯が合格の幅 */
-.meter { margin-top: 18px; }
+.meter { flex: 1; min-width: 0; }
 .meter-scale {
   position: relative;
-  height: 46px;
+  height: 40px;
   border-radius: var(--r-sm);
   background: var(--paper-2);
   overflow: hidden;
 }
 .tick {
-  position: absolute; bottom: 0; width: 1px; height: 9px;
+  position: absolute; bottom: 0; width: 1px; height: 8px;
   background: var(--ink-30); opacity: .55; transform: translateX(-50%);
 }
 .tick[data-center="true"] { height: 100%; background: var(--line-2); opacity: 1; }
@@ -4465,21 +4505,21 @@ body {
 .meter[data-state="low"] .needle { background: var(--low); }
 .meter-labels {
   display: flex; justify-content: space-between; align-items: center;
-  margin-top: 8px;
-  font-size: 11px; color: var(--ink-30);
+  margin-top: 6px;
+  font-size: 10px; color: var(--ink-30);
 }
 .lab-low { color: var(--low); }
 .lab-high { color: var(--high); }
 .cents {
   color: var(--ink);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
 /* 入力レベル */
 .level {
-  margin-top: 14px;
+  margin-top: 10px;
   height: 4px;
   background: var(--paper-3);
   border-radius: 2px;
@@ -4494,9 +4534,9 @@ body {
 }
 
 /* 操作。主ボタンは常に画面の同じ高さに来るようにしてある */
-.controls { margin-top: 14px; display: flex; align-items: stretch; gap: 10px; }
+.controls { margin-top: 10px; display: flex; align-items: stretch; gap: 8px; }
 .mic {
-  flex: 1; padding: 16px 10px; border: 0; border-radius: var(--r-md);
+  flex: 1; padding: 15px 10px; border: 0; border-radius: var(--r-md);
   background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
   cursor: pointer; font-variant-numeric: tabular-nums;
   box-shadow: var(--shadow);
@@ -4511,8 +4551,8 @@ body {
 }
 .reset:disabled { color: var(--ink-30); cursor: default; }
 .a4 {
-  margin-top: 12px; font-size: 11px; color: var(--ink-60);
-  display: flex; align-items: center; gap: 8px;
+  margin-top: 10px; font-size: 11px; color: var(--ink-60);
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
 }
 .a4 select {
   font-size: 13px; padding: 7px 10px; border: 1px solid var(--line);
@@ -4521,7 +4561,8 @@ body {
 }
 .error { margin: 14px 0 0; font-size: 12px; color: var(--high); line-height: 1.6; }
 .notice { margin: 12px 0 0; font-size: 11px; color: var(--ink-60); line-height: 1.6; }
-.foot { font-size: 11px; color: var(--ink-30); text-align: center; }
+/* 断り書きは常時出す必要がないので、下端に小さく添えるだけにする */
+.foot { display: none; }
 
 /* クラッシュ画面 */
 .crash {
